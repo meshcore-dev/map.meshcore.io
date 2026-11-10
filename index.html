@@ -1,18 +1,24 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 	<head>
+		<meta charset="utf-8" />
 		<link rel="stylesheet" href="./css/style.css" />
 		<link rel="stylesheet" href="./lib/css/beer.css" />
-		<link rel="stylesheet" href="./lib/css/leaflet.css" />
-		<link rel="stylesheet" href="./lib/css/MarkerCluster.css" />
-		<link rel="stylesheet" href="./lib/css/MarkerCluster.Default.css" />
+		<link rel="stylesheet" href="./lib/css/maplibre-gl.css" />
 		<script src="./lib/beer.min.js" type="module"></script>
-		<script src="./lib/leaflet.js"></script>
-		<script src="./lib/leaflet.markercluster.js"></script>
 		<meta name="viewport" content="initial-scale=1.0, width=device-width" />
 		<title>MeshCore Node Map</title>
 	</head>
 	<body class="light">
+		<script>
+			// apply the stored theme before anything renders (src/theme.js takes over once loaded)
+			try {
+				const theme = localStorage.getItem('theme');
+				if(theme === 'dark' || (theme !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches)) {
+					document.body.className = 'dark';
+				}
+			} catch {}
+		</script>
 		<div class="container">
 			<div id="map"></div>
 			<div id="app" v-cloak>
@@ -22,31 +28,43 @@
 						<span title="Stats">
 							<i>monitoring</i>
 						</span>
-						<span v-for="stat in stats" v-html="stat"></span>
+						<template v-if="stats">
+							<span>
+								<span>total: <b>{{ stats.total }}</b></span>&nbsp;|
+								<i class="node-type pointer-help" title="Total client nodes">person</i><b>{{ stats.clients }}</b>&nbsp;|
+								<i class="node-type pointer-help" title="Total repeater nodes">cell_tower</i><b>{{ stats.repeaters }}</b>&nbsp;|
+								<i class="node-type pointer-help" title="Total room server nodes">forum</i><b>{{ stats.roomServers }}</b>&nbsp;|
+								<i class="node-type pointer-help" title="Total sensor nodes">sensors</i><b>{{ stats.sensors }}</b>
+							</span>
+							<span v-for="period in stats.periods" :key="period.label">
+								<span class="pointer-help" :title="period.title">{{ period.label }}: <b>{{ period.count }}</b></span>
+							</span>
+						</template>
 						<span style="flex-grow: 1"></span>
-						<a href="https://github.com/recrof/map.meshcore.dev" class="github" title="go to github repo" target="_blank">
-							<img src="./lib/images/github-mark.svg">
+						<a href="https://github.com/meshcore-dev/map.meshcore.dev" class="github" title="go to github repo" target="_blank">
+							<img src="./lib/images/github-mark.svg" alt="GitHub">
 						</a>
-					</a>
 				</div>
 				<form class="search no-margin" data-ui action="javascript:;">
-					<menu class="left no-wrap" id="node-filter">
+					<menu id="node-filter" :class="['left', 'no-wrap', { active: app.filterOpen }]" @click.stop>
 						<li>
+							<label class="checkbox">
+								<input type="checkbox" v-model="app.searchInViewport">
+								<span>Search in current view only</span>
+							</label>
+						</li>
+						<li class="divider"></li>
+						<li class="columns">
+							<span>Node Type</span>
 							<label class="checkbox">
 								<input type="checkbox" value="1" v-model="app.nodeFilter"><span>Clients</span>
 							</label>
-						</li>
-						<li>
 							<label class="checkbox">
 								<input type="checkbox" value="2" v-model="app.nodeFilter"><span>Repeaters</span>
 							</label>
-						</li>
-						<li>
 							<label class="checkbox">
 								<input type="checkbox" value="3" v-model="app.nodeFilter"><span>Room Servers</span>
 							</label>
-						</li>
-						<li>
 							<label class="checkbox">
 								<input type="checkbox" value="4" v-model="app.nodeFilter"><span>Sensors</span>
 							</label>
@@ -72,18 +90,32 @@
 								<label>Inserted</label>
 							</div>
 						</li>
-						<li style="flex-direction:column;gap:0">
+						<li class="columns">
 							<span>Clustering zoom level</span>
 							<label class="slider tiny">
-								<input min="10" max="17" type="range" v-model="app.clusteringZoom">
+								<input min="10" max="17" type="range" v-model.number="app.clusteringZoom">
 								<span></span>
 							</label>
 						</li>
-						<li v-if="app.availableFreqs.length > 0" style="flex-direction:column;gap:4px">
+						<li class="divider"></li>
+						<li class="columns" v-if="app.availableFreqs.length > 0">
 							<span>Frequency</span>
 							<label class="checkbox" v-for="freq in app.availableFreqs" :key="freq">
 								<input type="checkbox" :value="freq" v-model="app.freqFilter">
 								<span>{{ freq }} MHz</span>
+							</label>
+						</li>
+						<li class="divider"></li>
+						<li>
+							<label class="checkbox">
+								<input type="checkbox" v-model="app.onlyDuplicates">
+								<span>Only show duplicates</span>
+							</label>
+						</li>
+						<li>
+							<label class="checkbox">
+								<input type="checkbox" v-model="app.showNodeNames">
+								<span>Show node names from zoom {{ nodeNamesZoom }}</span>
 							</label>
 						</li>
 						<li v-if="filtersActive">
@@ -91,26 +123,379 @@
 						</li>
 					</menu>
 					<div class="field border no-margin">
-						<input type="text" class="background" list="nodes" v-model="app.search" placeholder="Search Nodes" v-if="app.nodes">
-						<button type="button" class="filter" :class="{ circle: !filtersActive, transparent: !filtersActive, 'error-container': filtersActive }" data-ui="#node-filter">
+						<input type="text" class="background" list="nodes" v-model="app.search" placeholder="Search Nodes" @focus="app.searchFocused = true" @blur="app.searchFocused = false" @keydown.esc="app.searchFocused = false; $event.target.blur()">
+						<button type="button" class="filter" :class="{ circle: !filtersActive, transparent: !filtersActive, 'error-container': filtersActive }" @click.stop="app.filterOpen = !app.filterOpen">
 							<i>filter_alt</i>
 							<span v-if="filtersActive">Filters active</span>
 						</button>
 					</div>
-					<article class="search-results no-margin no-padding" v-if="searchResults?.length > 0">
-						<ul class="list no-space border">
-							<li v-for="node in searchResults" tabindex="0" @click="showNode(node)" @keyup.enter="showNode(node)">
-								<img :src="`./img/node_types/${node.type}.svg`" width="32">
-								<div class="max search-text">
-									<h6 class="small" v-html="highlightString(node.adv_name, app.search)"></h6>
-									<div class="search-pkey" v-html="highlightString(node.public_key, app.search)"></div>
+					<node-search-results
+						v-if="app.searchFocused && searchResults.length > 0"
+						:results="searchResults"
+						:query="app.search"
+						:is-selected="deletionRequest.pickingOnMap ? isInDeletionRequest : null"
+						@select="onSearchSelect"
+					></node-search-results>
+				</form>
+				<div class="deletion-picker" v-if="deletionRequest.pickingOnMap">
+					<i>ads_click</i>
+					<span class="max">Click nodes on the map to add or remove them from the deletion request (<b>{{ deletionRequest.publicKeys.length }}</b><template v-if="deletionMaxNodes !== Infinity">/{{ deletionMaxNodes }}</template> selected<template v-if="isDeletionRequestFull()">, maximum reached</template>)</span>
+					<button type="button" class="small" @click="finishPickingOnMap">
+						<i>check</i>
+						<span>Done</span>
+					</button>
+				</div>
+				<div class="coverage-panel" v-if="(coverage.publicKey || coverage.point) && !deletionRequest.pickingOnMap">
+					<div class="coverage-header">
+						<i>cell_tower</i>
+						<span class="coverage-title">Coverage of <b>{{ coverage.name }}</b></span>
+						<progress v-if="coverage.loading" class="circle small"></progress>
+						<button type="button" class="circle transparent small" title="Hide coverage" @click="closeCoverage">
+							<i>close</i>
+						</button>
+					</div>
+					<button type="button" class="chip small coverage-summary" :aria-expanded="coverageSettingsOpen" @click="coverageSettingsOpen = !coverageSettingsOpen">
+						<i>{{ coverageSettingsOpen ? 'expand_less' : 'tune' }}</i>
+						<span>
+							{{ coverage.radio?.freq ?? coverage.settings.frequency }} MHz · {{ coverage.settings.txPower }} dBm ·
+							{{ coverage.settings.antennaGain }} dBi · {{ coverage.settings.antennaHeight }} m · {{ coverage.settings.distanceKm }} km
+						</span>
+					</button>
+					<div class="coverage-settings" v-show="coverageSettingsOpen">
+						<template v-if="coverage.point">
+							<span>Radio</span>
+							<div>
+								<select class="preset-select" v-model="coverage.radioPreset" title="Radio settings for picked points on the map">
+								<option value="">Nearby repeaters (auto)</option>
+								<option v-for="preset in coveragePresets" :key="preset.name" :value="preset.name">{{ preset.name }} – {{ preset.desc }}<template v-if="preset.count"> ({{ preset.count }} {{ preset.count === 1 ? 'node' : 'nodes' }} around)</template></option>
+							</select>
+							</div>
+						</template>
+						<span>Frequency</span>
+						<div>
+							<button v-for="option in coverageOptions.frequency" :key="option.value" type="button"
+								:class="['chip', 'small', { fill: coverage.settings.frequency === option.value }]"
+								@click="coverage.settings.frequency = option.value">{{ option.label }}</button>
+						</div>
+						<span>TX power</span>
+						<div>
+							<button v-for="value in coverageOptions.txPower" :key="value" type="button"
+								:class="['chip', 'small', { fill: coverage.settings.txPower === value }]"
+								@click="coverage.settings.txPower = value">{{ value }} dBm</button>
+						</div>
+						<span>Antenna gain</span>
+						<div>
+							<button v-for="value in coverageOptions.antennaGain" :key="value" type="button"
+								:class="['chip', 'small', { fill: coverage.settings.antennaGain === value }]"
+								@click="coverage.settings.antennaGain = value">{{ value }} dBi</button>
+						</div>
+						<span>Antenna height</span>
+						<div>
+							<button v-for="value in coverageOptions.antennaHeight" :key="value" type="button"
+								:class="['chip', 'small', { fill: coverage.settings.antennaHeight === value }]"
+								@click="coverage.settings.antennaHeight = value">{{ value }} m</button>
+						</div>
+						<span>Buildings &amp; trees</span>
+						<div>
+							<button v-for="option in coverageOptions.clutter" :key="String(option.value)" type="button"
+								:class="['chip', 'small', { fill: coverage.settings.clutter === option.value }]"
+								:title="option.title"
+								@click="coverage.settings.clutter = option.value">{{ option.label }}</button>
+						</div>
+						<span>Rounded ridges</span>
+						<div>
+							<button v-for="option in coverageOptions.ridgeRounding" :key="option.value" type="button"
+								:class="['chip', 'small', { fill: coverage.settings.ridgeRounding === option.value }]"
+								:title="option.title"
+								@click="coverage.settings.ridgeRounding = option.value">{{ option.label }}</button>
+						</div>
+						<span>Show nodes</span>
+						<div>
+							<button v-for="option in coverageOptions.nodeDisplay" :key="option.value" type="button"
+								:class="['chip', 'small', { fill: coverage.settings.nodeDisplay === option.value }]"
+								@click="coverage.settings.nodeDisplay = option.value">{{ option.label }}</button>
+						</div>
+						<span>Draw distance</span>
+						<div>
+							<button v-for="value in coverageOptions.distanceKm" :key="value" type="button"
+								:class="['chip', 'small', { fill: coverage.settings.distanceKm === value }]"
+								@click="coverage.settings.distanceKm = value">{{ value }} km</button>
+						</div>
+					</div>
+					<div class="coverage-legend">
+						<span>strong</span>
+						<span class="coverage-gradient"></span>
+						<span>weak</span>
+					</div>
+					<p v-if="coverage.linkCounts" class="coverage-links">
+						<template v-if="coverage.linkCounts[1] + coverage.linkCounts[2] + coverage.linkCounts[3]">
+							Nodes in reach with the same radio settings:
+							<span class="coverage-link-count bars-3"><i>signal_cellular_alt</i>{{ coverage.linkCounts[3] }}</span>
+							<span class="coverage-link-count bars-2"><i>signal_cellular_alt_2_bar</i>{{ coverage.linkCounts[2] }}</span>
+							<span class="coverage-link-count bars-1"><i>signal_cellular_alt_1_bar</i>{{ coverage.linkCounts[1] }}</span>
+						</template>
+						<template v-else>No visible nodes with the same radio settings in reach.</template>
+					</p>
+					<p v-if="coverage.error" class="coverage-error">{{ coverage.error }}</p>
+					<p class="coverage-note" id="coverage-details" v-if="coverage.radio && coverageInfoOpen">
+						LoRa SF{{ coverage.radio.sf }}, {{ coverage.radio.bw }} kHz (from the node's radio params): receiver sensitivity
+						{{ coverageSensitivity }} dBm with {{ coverageFadeMargin }} dB fade margin, {{ coverageReceiver.gain }} dBi antenna {{ coverageReceiver.height }} m above ground.
+						The signal fades with distance and where terrain gets into the Fresnel zone or blocks the path
+						(ridges as knife edges<template v-if="coverage.settings.ridgeRounding > 0">, plus {{ coverage.settings.ridgeRounding * 100 }} % of the extra loss of rounded hills</template>).
+						Crude estimate over terrain with forests (25 m trees)<template v-if="coverage.settings.clutter">;
+						handhelds in built-up areas and forests lose 18-22 dB to the buildings and trees around them (ITU-R P.2108),
+						repeaters and room servers are taken to be above them</template>.
+						Single buildings and reflections are not taken into account.
+					</p>
+					<div class="coverage-credits">
+						<button type="button" class="coverage-info" :class="{ active: coverageInfoOpen }" :aria-expanded="coverageInfoOpen"
+							aria-controls="coverage-details" title="How the estimate is made" @click="coverageInfoOpen = !coverageInfoOpen">
+							<i>info</i>
+						</button>
+						<span>
+							Elevation: <a href="https://mapterhorn.com/attribution" target="_blank" rel="noopener">© Mapterhorn</a>,
+							forests &amp; buildings: <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">© OpenStreetMap</a>
+						</span>
+					</div>
+				</div>
+				<div class="profile-panel" v-if="profile.a && !deletionRequest.pickingOnMap">
+					<div class="profile-header">
+						<i>timeline</i>
+						<span class="profile-title">
+							<span class="profile-end">A</span> <b>{{ profileEnds[0]?.adv_name ?? '…' }}</b>
+							<i class="profile-arrow">arrow_forward</i>
+							<template v-if="profile.b"><span class="profile-end">B</span> <b>{{ profileEnds[1]?.adv_name ?? '…' }}</b></template>
+							<span v-else class="profile-hint">pick the other end: right-click the map (long-press on touch screens) or open a node</span>
+						</span>
+						<progress v-if="profile.loading" class="circle small"></progress>
+						<button type="button" class="circle transparent small" title="Swap the ends" :disabled="!profile.b" @click="swapProfileEnds">
+							<i>swap_horiz</i>
+						</button>
+						<button type="button" class="circle transparent small" title="Close the profile" @click="closeProfile">
+							<i>close</i>
+						</button>
+					</div>
+					<div class="profile-settings">
+						<span><span class="profile-end">A</span><span class="profile-label"> antenna</span></span>
+						<div>
+							<button v-for="value in profileHeights" :key="value" type="button"
+								:class="['chip', 'small', { fill: profile.heightA === value }]"
+								@click="profile.heightA = value">{{ value }} m</button>
+						</div>
+						<span><span class="profile-end">B</span><span class="profile-label"> antenna</span></span>
+						<div>
+							<button v-for="value in profileHeights" :key="value" type="button"
+								:class="['chip', 'small', { fill: profile.heightB === value }]"
+								@click="profile.heightB = value">{{ value }} m</button>
+						</div>
+						<template v-if="profileUsesPreset">
+							<span>Radio</span>
+							<div class="profile-radio">
+								<select class="preset-select" v-model="coverage.radioPreset" title="Radio settings for picked points on the map">
+								<option value="">Nearby repeaters (auto)</option>
+								<option v-for="preset in profilePresets" :key="preset.name" :value="preset.name">{{ preset.name }} – {{ preset.desc }}<template v-if="preset.count"> ({{ preset.count }} {{ preset.count === 1 ? 'node' : 'nodes' }} around)</template></option>
+							</select>
+							</div>
+						</template>
+					</div>
+					<template v-if="profileView">
+						<canvas ref="profileCanvas" class="profile-chart" @pointermove="onChartPointer" @pointerdown="onChartPointer" @pointerleave="onChartLeave"></canvas>
+						<div class="profile-summary">
+							<span :class="['profile-status', profileView.clearance.status]">
+								<i>{{ profileView.clearance.status === 'clear' ? 'visibility' : profileView.clearance.status === 'fresnel' ? 'visibility' : 'visibility_off' }}</i>
+								{{ profileView.clearance.status === 'clear' ? 'Clear line of sight' : profileView.clearance.status === 'fresnel' ? 'Fresnel zone partly blocked' : 'Line of sight blocked' }}
+							</span>
+							<span :class="['profile-margin', 'bars-' + profileView.bars]">
+								<i>{{ ['signal_cellular_nodata', 'signal_cellular_alt_1_bar', 'signal_cellular_alt_2_bar', 'signal_cellular_alt'][profileView.bars] }}</i>
+								link margin <b>{{ profileView.result.margin >= 0 ? '+' : '' }}{{ profileView.result.margin.toFixed(1) }} dB</b>
+							</span>
+							<span>{{ (profileView.result.distance / 1000).toFixed(1) }} km</span>
+							<span>A→B {{ profileView.result.bearing.toFixed(1) }}°, B→A {{ profileView.result.backBearing.toFixed(1) }}°</span>
+							<span>A {{ Math.round(profileView.result.elevations[0]) }} m + {{ profileView.heights[0] }} m, B {{ Math.round(profileView.result.elevations.at(-1)) }} m + {{ profileView.heights[1] }} m</span>
+							<span :title="`free space ${profileView.result.losses.freeSpace.toFixed(1)} dB, terrain ${profileView.result.losses.diffraction.toFixed(1)} dB, clutter ${(profileView.result.losses.clutterA + profileView.result.losses.clutterB).toFixed(1)} dB`">
+								path loss <b>{{ profileView.result.losses.total.toFixed(1) }} dB</b>
+								<template v-if="profileView.result.losses.diffraction >= 0.1 || profileView.result.losses.clutterA + profileView.result.losses.clutterB >= 0.1">
+									({{ profileView.result.losses.freeSpace.toFixed(1) }} free space<template v-if="profileView.result.losses.diffraction >= 0.1"> + {{ profileView.result.losses.diffraction.toFixed(1) }} terrain</template><template v-if="profileView.result.losses.clutterA + profileView.result.losses.clutterB >= 0.1"> + {{ (profileView.result.losses.clutterA + profileView.result.losses.clutterB).toFixed(1) }} clutter</template>)
+								</template>
+							</span>
+						</div>
+						<p class="coverage-note">
+							{{ profileView.radio.freq }} MHz, SF{{ profileView.radio.sf }}, {{ profileView.radio.bw }} kHz,
+							{{ coverage.settings.txPower }} dBm and {{ coverage.settings.antennaGain }} dBi on both ends (coverage settings),
+							receiver sensitivity {{ profileView.sensitivity }} dBm with {{ coverageFadeMargin }} dB fade margin.
+							Same model as the coverage estimate<template v-if="coverage.settings.clutter">, with buildings &amp; trees around antennas below them</template><template v-if="coverage.settings.ridgeRounding > 0"> and {{ coverage.settings.ridgeRounding * 100 }} % rounded ridges</template>.
+						</p>
+					</template>
+					<p v-if="profile.error" class="coverage-error">{{ profile.error }}</p>
+				</div>
+				<div class="map-menu" v-if="mapMenu.open" :style="{ left: mapMenu.x + 'px', top: mapMenu.y + 'px' }" @contextmenu.prevent>
+					<div class="map-menu-coords">{{ mapMenu.lat.toFixed(5) }}, {{ mapMenu.lon.toFixed(5) }}</div>
+					<button type="button" @click="mapMenuCoverage"><i>cell_tower</i>Coverage from here</button>
+					<button type="button" @click="mapMenuProfileFrom"><i>trip_origin</i>Profile from here</button>
+					<button type="button" v-if="profile.a" @click="mapMenuProfileTo"><i>place</i>Profile to here</button>
+					<button type="button" @click="mapMenuCopy"><i>content_copy</i>Copy coordinates</button>
+				</div>
+				<dialog ref="deletionDialog" class="deletion-dialog" @close="onDeletionDialogClose">
+					<nav>
+						<h5>Request node deletion</h5>
+						<span class="max"></span>
+						<button type="button" class="transparent circle" @click="deletionRequest.open = false"><i>close</i></button>
+					</nav>
+					<template v-if="deletionRequest.step === 'sent'">
+						<div class="deletion-sent">
+							<i class="extra">mark_email_read</i>
+							<h6>Thanks, your request is on its way</h6>
+							<p>
+								Once the email is sent, <b>{{ deletionRequest.sentKeys.length }} node(s)</b> will be deleted - there's no need to send them again.
+								If you find more nodes later, add them all to a new request and send it as one email.
+							</p>
+						</div>
+						<nav class="deletion-footer">
+							<button type="button" class="border small" @click="undoDeletionRequestSent">
+								<i>undo</i>
+								<span>I didn't send it</span>
+							</button>
+							<span class="max"></span>
+							<button type="button" class="small" @click="deletionRequest.open = false">Done</button>
+						</nav>
+					</template>
+					<template v-else>
+						<p class="deletion-step">
+							<template v-if="deletionRequest.step === 'collect'"><b>Step 1 of 2:</b> add all the nodes you want deleted</template>
+							<template v-else><b>Step 2 of 2:</b> send one email for all of them</template>
+						</p>
+						<p v-if="deletionRequest.step === 'collect'" class="deletion-hint">
+							<i>info</i>
+							<span>
+								Add <b>all</b> your nodes first - by name, public key or from the map<template v-if="deletionMaxNodes !== Infinity"> (up to {{ deletionMaxNodes }} per request)</template> -
+								and send <b>one</b> email for all of them. Please don't send a separate email for each node.
+							</span>
+						</p>
+						<ul class="list no-space deletion-nodes" v-if="deletionNodes.length">
+							<li v-for="node in deletionNodes" :key="node.public_key" :class="{ 'deletion-requested': isDeletionRequested(node.public_key) }">
+								<img v-if="node.type" :src="`./img/node_types/${node.type}.svg`" width="32" alt="">
+								<i v-else>help</i>
+								<div class="max deletion-node-text">
+									<h6 class="small">{{ node.adv_name }}</h6>
+									<div class="search-pkey">{{ node.public_key }}</div>
 								</div>
+								<span v-if="isDeletionRequested(node.public_key)" class="deletion-badge" title="This node was already in a request you sent, it won't be included again">already requested</span>
+								<button v-if="deletionRequest.step === 'collect'" type="button" class="circle transparent" title="Remove from the request" @click="removeFromDeletionRequest(node.public_key)">
+									<i>close</i>
+								</button>
 							</li>
 						</ul>
-					</article>
-				</form>
+						<template v-if="deletionRequest.step === 'collect'">
+							<nav ref="deletionSearchBox" class="deletion-search no-space">
+								<div class="field border prefix small max no-margin">
+									<i>search</i>
+									<input
+										ref="deletionSearchInput"
+										type="text"
+										v-model="deletionSearch.query"
+										:placeholder="isDeletionRequestFull() ? `Maximum of ${deletionMaxNodes} nodes per request` : 'Add node by name or public key'"
+										:disabled="isDeletionRequestFull()"
+										@focus="deletionSearch.focused = true"
+										@blur="deletionSearch.focused = false"
+										@keydown.esc="onDeletionSearchEsc"
+										@keydown.enter.prevent="deletionSearchResults.length && selectDeletionNode(deletionSearchResults[0])"
+									>
+								</div>
+								<button type="button" class="border small-round" title="Add nodes from the map" @click="startPickingOnMap">
+									<i>map</i>
+									<span>Add from map</span>
+								</button>
+							</nav>
+							<p v-if="deletionNodes.length && !pendingCount" class="deletion-hint">
+								<i>check_circle</i>
+								<span>Deletion of these nodes was already requested, there's no need to send them again.</span>
+							</p>
+							<div v-if="deletionRequest.confirmingSingle" class="deletion-confirm">
+								<p><b>Only one node?</b> If you have other nodes to delete, add them now - one email can hold all of them.</p>
+								<nav class="right-align wrap">
+									<button type="button" class="small" @click="addMoreNodes">
+										<i>add</i>
+										<span>Add more nodes</span>
+									</button>
+									<button type="button" class="border small" @click="goToSendStep">Send just this one</button>
+								</nav>
+							</div>
+							<nav v-else class="deletion-footer right-align">
+								<button type="button" class="small" :disabled="!pendingCount" @click="goToSendStep">
+									<span>I've added all my nodes</span>
+									<i>arrow_forward</i>
+								</button>
+							</nav>
+						</template>
+						<div v-else class="deletion-send">
+							<button type="button" class="transparent small deletion-back" @click="addMoreNodes">
+								<i>arrow_back</i>
+								<span>Add more nodes</span>
+							</button>
+							<p>Pick where to send the email from, it will be pre-filled for you.</p>
+							<nav class="deletion-actions wrap">
+								<span>Send from:</span>
+								<a v-for="link in composeLinks" :key="link.label" class="button border small" :href="link.href" :target="link.target" rel="noopener" @click="onComposeLinkClick">
+									<i>{{ link.icon }}</i>
+									<span>{{ link.label }}</span>
+								</a>
+								<button type="button" class="border small" :aria-expanded="deletionRequest.showManual" aria-controls="deletion-manual-fields" @click="deletionRequest.showManual = !deletionRequest.showManual">
+									<i>{{ deletionRequest.showManual ? 'expand_less' : 'edit_note' }}</i>
+									<span>Send email manually</span>
+								</button>
+								<a v-if="userAction" class="button small" :href="userAction.href" target="_blank" rel="noopener">
+									<i>admin_panel_settings</i>
+									<span>{{ userAction.label }}</span>
+								</a>
+							</nav>
+							<div id="deletion-manual-fields" class="deletion-manual-fields" v-show="deletionRequest.showManual">
+								<p>
+									Requests are processed automatically: when sending manually, <b>use the exact address shown</b>,
+									including the part after <b>+</b>, otherwise the request won't be processed.
+								</p>
+								<div class="deletion-field">
+									<label>To</label>
+									<output class="deletion-value">{{ deletionEmail }}</output>
+									<button type="button" class="circle transparent" title="Copy address" @click="copyText('to', deletionEmail)">
+										<i>{{ copiedField === 'to' ? 'check' : 'content_copy' }}</i>
+									</button>
+								</div>
+								<div class="deletion-field">
+									<label>Subject</label>
+									<output class="deletion-value">{{ deletionSubject }}</output>
+									<button type="button" class="circle transparent" title="Copy subject" @click="copyText('subject', deletionSubject)">
+										<i>{{ copiedField === 'subject' ? 'check' : 'content_copy' }}</i>
+									</button>
+								</div>
+								<div class="deletion-field">
+									<label for="deletion-body">Body</label>
+									<textarea id="deletion-body" rows="8" v-model="deletionRequest.body"></textarea>
+									<button type="button" class="circle transparent" title="Copy body" @click="copyText('body', deletionRequest.body)">
+										<i>{{ copiedField === 'body' ? 'check' : 'content_copy' }}</i>
+									</button>
+								</div>
+								<nav class="right-align">
+									<button type="button" class="small" @click="markDeletionRequestSent">
+										<i>check</i>
+										<span>I've sent the email</span>
+									</button>
+								</nav>
+							</div>
+						</div>
+					</template>
+					<!-- outside the steps: the results popover has to exist whenever the search does -->
+					<div ref="deletionResultsPopover" popover="manual" class="deletion-search-popover">
+						<node-search-results
+							v-if="showDeletionResults"
+							:results="deletionSearchResults"
+							:query="deletionSearch.query"
+							:is-selected="isInDeletionRequest"
+							@select="selectDeletionNode"
+						></node-search-results>
+					</div>
+				</dialog>
 			</div>
 		</div>
+		<script type="module" src="./src/main.js"></script>
 	</body>
-	<script type="module" src="./src/map.js"></script>
 </html>

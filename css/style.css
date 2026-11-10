@@ -1,26 +1,8 @@
-@font-face {
-	font-family: Material Symbols Outlined;
-	font-style: normal;
-	font-weight: 400;
-	font-display: block;
-	src: url(https://cdn.jsdelivr.net/npm/beercss@3.9.4/dist/cdn/material-symbols-outlined.woff2) format("woff2")
-}
-
 [v-cloak] {
 	display: none !important;
 }
 
 body { margin: 0; }
-body:has(dialog[open])::after {
-	content: '';
-	position: absolute;
-	z-index: 1049;
-	top: 0;
-	left: 0;
-	bottom: 0;
-	right: 0;
-	backdrop-filter: blur(10px);
-}
 
 body:has(#app .loading)::before {
 	content: '';
@@ -30,15 +12,17 @@ body:has(#app .loading)::before {
 	left: 0;
 	bottom: 0;
 	right: 0;
-	backdrop-filter: grayscale(1) blur(2px);
 	background-image: url('../img/loader.svg');
 	background-position: center;
 	background-repeat: no-repeat;
 	background-size: 64px;
+	background-color: rgba(0,0,0,0.20);
 }
 
-dialog[open] {
-	z-index: 1050 !important;
+/* img/loader.svg with a white fill (a background image can't be recoloured with CSS) */
+body.dark:has(#app .loading)::before {
+	background-image: url("data:image/svg+xml,%3Csvg width='24' height='24' viewBox='0 0 24 24' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath fill='%23fff' d='M10.14,1.16a11,11,0,0,0-9,8.92A1.59,1.59,0,0,0,2.46,12,1.52,1.52,0,0,0,4.11,10.7a8,8,0,0,1,6.66-6.61A1.42,1.42,0,0,0,12,2.69h0A1.57,1.57,0,0,0,10.14,1.16Z'%3E%3CanimateTransform attributeName='transform' type='rotate' dur='0.75s' values='0 12 12;360 12 12' repeatCount='indefinite'/%3E%3C/path%3E%3C/svg%3E");
+	background-color: rgba(0,0,0,0.40);
 }
 
 #map { height: 100vh; }
@@ -53,7 +37,7 @@ table.node-info td {
 table.node-info tr td:first-child {
 	width: 150px;
 }
-table.node-info tr td:last-child {
+table.node-info tr td.break-all {
 	word-break:break-all;
 }
 
@@ -76,25 +60,382 @@ table.node-info tr td:last-child {
 	display: flex;
 	justify-content: center;
 }
-.add-dialog {
-	z-index: 1050;
-	padding: 15px;
-	max-height: 80vh;
+.deletion-dialog {
+	inline-size: min(600px, calc(100% - 32px));
+	min-inline-size: 0;
+	max-block-size: 85vh;
 }
 
-.add-dialog .page {
+/* beer.css hides ::backdrop for all dialogs */
+.deletion-dialog::backdrop {
+	display: block;
+	visibility: visible;
+	opacity: 1;
+	background: rgba(0,0,0,0.3);
+}
+
+.deletion-dialog p {
+	margin: 0 0 12px;
+}
+
+.deletion-hint {
+	display: flex;
+	gap: 8px;
+	align-items: flex-start;
+	padding: 8px 12px;
+	border-radius: 8px;
+	background-color: var(--secondary-container);
+	color: var(--on-secondary-container);
+}
+
+.deletion-field {
+	display: grid;
+	grid-template-columns: 70px 1fr auto;
+	align-items: center;
+	gap: 8px;
+	margin-bottom: 8px;
+}
+
+.deletion-field label {
+	font-weight: bold;
+}
+
+.deletion-value,
+.deletion-field textarea {
+	inline-size: 100%;
+	padding: 6px 10px;
+	border: 1px solid var(--outline);
+	border-radius: 6px;
+	background: var(--surface);
+	color: var(--on-surface);
+	font: inherit;
+}
+
+/* read-only values wrap instead of being cut off, one click selects the whole value */
+.deletion-value {
+	display: block;
+	overflow-wrap: anywhere;
+	user-select: all;
+	cursor: text;
+}
+
+.deletion-field textarea {
+	resize: vertical;
+	font-family: monospace;
+	font-size: 0.85em;
+}
+
+.deletion-actions {
+	margin-top: 12px;
+}
+
+/* "Step 1 of 2" line under the dialog title */
+.deletion-dialog .deletion-step {
+	margin: 4px 0 12px;
+	color: var(--on-surface-variant);
+}
+
+.deletion-footer {
+	margin-top: 16px;
+}
+
+.deletion-confirm {
+	margin-top: 16px;
+	padding: 12px;
+	border-radius: 8px;
+	background-color: var(--tertiary-container);
+	color: var(--on-tertiary-container);
+}
+
+.deletion-dialog .deletion-confirm p {
+	margin-bottom: 8px;
+}
+
+.deletion-back {
+	margin: 0 0 8px -12px;
+}
+
+/* nodes from an earlier request stay listed, but are left out of the email */
+.deletion-requested .deletion-node-text,
+.deletion-requested > img {
+	opacity: 0.5;
+}
+
+.deletion-badge {
+	padding: 2px 8px;
+	border-radius: 12px;
+	white-space: nowrap;
+	font-size: 0.75rem;
+	background-color: var(--secondary-container);
+	color: var(--on-secondary-container);
+}
+
+.deletion-sent {
+	padding: 16px 0 0;
 	text-align: center;
 }
 
-.add-dialog .page img {
-	max-width: 50%;
-	max-height: 300px;
+.deletion-sent > i {
+	color: var(--primary);
 }
 
-@media (max-width: 800px) {
-	.add-dialog {
-		width: 95%;
-		max-height: 100vh;
+.deletion-sent h6 {
+	margin: 8px 0 12px;
+}
+
+.deletion-manual-fields {
+	margin-top: 16px;
+}
+
+.deletion-nodes {
+	max-block-size: 30vh;
+	overflow-y: auto;
+	margin: 0 0 12px;
+}
+
+/* .list prefix: beer.css is loaded after this file and its .list > li rules would win otherwise.
+   flex: none - beer.css items shrink (and lose their padding) once the list is long enough to scroll */
+.list.deletion-nodes > li {
+	flex: none;
+	padding-block: 5px;
+}
+
+.deletion-node-text {
+	min-inline-size: 0;
+}
+
+.deletion-search {
+	gap: 8px;
+}
+
+/* top-layer popover, positioned under the search box from JS (see positionDeletionResults) */
+.deletion-search-popover {
+	position: fixed;
+	inset: auto;
+	margin: 0;
+	padding: 0;
+	border: none;
+	background: transparent;
+	overflow: visible;
+}
+
+.deletion-search-popover .search-results {
+	max-block-size: inherit;
+	box-shadow: var(--elevate2);
+}
+
+.deletion-send {
+	margin-top: 16px;
+}
+
+/* "pick on map" mode: a banner under the search box and a red frame around the map */
+.deletion-picker {
+	position: fixed;
+	z-index: 999;
+	top: 100px;
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	inline-size: min(600px, calc(100% - 20px));
+	padding: 8px 8px 8px 16px;
+	border-radius: 8px;
+	background-color: var(--error-container);
+	color: var(--on-error-container);
+	box-shadow: 0 2px 8px rgba(0,0,0,0.25);
+}
+
+.coverage-panel {
+	position: fixed;
+	z-index: 999;
+	top: 100px;
+	inline-size: min(600px, calc(100% - 20px));
+	padding: 6px 8px 10px 16px;
+	border-radius: 8px;
+	background-color: var(--surface-container, #f3edf7);
+	color: var(--on-surface);
+	box-shadow: 0 2px 8px rgba(0,0,0,0.25);
+}
+.coverage-panel {
+	/* above the profile panel when that's open */
+	max-block-size: calc(100vh - 150px - var(--profile-panel-height, 0px));
+	overflow-y: auto;
+}
+.coverage-header {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+.coverage-header > i {
+	color: rgb(220, 38, 38);
+}
+/* beer.css styles every <button>, this one is a plain text toggle */
+/* the settings in one line, a chip that shows / hides them */
+.coverage-panel .coverage-summary {
+	gap: 6px;
+	margin: 4px 0 0;
+	font-size: 0.8rem;
+	color: var(--on-surface-variant);
+}
+.coverage-panel .coverage-summary > i {
+	font-size: 18px;
+	margin-inline-end: 6px;
+}
+.coverage-settings {
+	display: grid;
+	grid-template-columns: auto 1fr;
+	align-items: center;
+	gap: 4px 12px;
+	margin-block-start: 6px;
+	font-size: 0.85rem;
+}
+.coverage-settings > div {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px;
+}
+.coverage-settings .chip {
+	margin: 0;
+}
+.coverage-legend {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin-block-start: 8px;
+	font-size: 0.75rem;
+	color: var(--on-surface-variant);
+}
+/* same as the opacity range of the coverage image */
+.coverage-gradient {
+	flex: 1;
+	max-inline-size: 200px;
+	block-size: 10px;
+	border-radius: 5px;
+	background: linear-gradient(to right, rgba(220, 38, 38, 0.85), rgba(220, 38, 38, 0.1));
+}
+.coverage-title {
+	flex: 1;
+	min-inline-size: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.coverage-heights .chip {
+	margin: 0;
+}
+.coverage-links {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 4px 10px;
+	margin: 6px 0 0;
+	font-size: 0.8rem;
+}
+.coverage-link-count {
+	display: inline-flex;
+	align-items: center;
+	gap: 2px;
+	font-weight: bold;
+}
+.coverage-link-count i {
+	font-size: 18px;
+}
+.coverage-link-count.bars-3 i { color: #2e7d32; }
+.coverage-link-count.bars-2 i { color: #f9a825; }
+.coverage-link-count.bars-1 i { color: #d32f2f; }
+
+.coverage-note,
+.coverage-error {
+	margin: 6px 8px 0 0;
+	font-size: 0.75rem;
+	line-height: 1.3;
+}
+.coverage-note {
+	color: var(--on-surface-variant);
+}
+.coverage-error {
+	color: var(--error);
+}
+.coverage-note a,
+.coverage-credits a {
+	color: inherit;
+	text-decoration: underline;
+}
+.coverage-credits {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	margin: 4px 8px 0 -4px;
+	font-size: 0.75rem;
+	line-height: 1.3;
+	color: var(--on-surface-variant);
+}
+/* plain icon button (not beer.css' filled one) */
+.coverage-credits button.coverage-info {
+	flex: none;
+	width: 28px;
+	height: 28px;
+	min-width: 0;
+	min-height: 0;
+	margin: 0;
+	padding: 0;
+	border-radius: 50%;
+	background: none;
+	color: inherit;
+	box-shadow: none;
+}
+.coverage-credits button.coverage-info i {
+	font-size: 20px;
+}
+.coverage-credits button.coverage-info:hover,
+.coverage-credits button.coverage-info.active {
+	background: color-mix(in srgb, currentColor 14%, transparent);
+	color: var(--on-surface);
+}
+
+body.deletion-picking #map::after {
+	content: '';
+	position: absolute;
+	z-index: 999;
+	inset: 0;
+	pointer-events: none;
+	box-shadow: inset 0 0 0 4px var(--error);
+}
+
+#map.node-hover .maplibregl-canvas-container.maplibregl-interactive,
+#map.cluster-hover .maplibregl-canvas-container.maplibregl-interactive {
+	cursor: pointer;
+}
+
+body.deletion-picking #map.node-hover .maplibregl-canvas-container.maplibregl-interactive {
+	cursor: copy;
+}
+
+/* no more nodes can be added (selected ones can still be clicked to remove them) */
+body.deletion-picking.deletion-full #map.node-hover .maplibregl-canvas-container.maplibregl-interactive {
+	cursor: not-allowed;
+}
+
+@media (max-width: 500px) {
+	.deletion-dialog {
+		inset-block-start: 16px;
+		max-block-size: calc(100vh - 32px);
+		padding: 1rem;
+	}
+
+	.deletion-dialog textarea {
+		block-size: 9rem;
+	}
+
+	.deletion-field {
+		grid-template-columns: 1fr auto;
+	}
+
+	.deletion-field label {
+		grid-column: 1 / -1;
+	}
+
+	.deletion-search button > span {
+		display: none;
 	}
 }
 
@@ -111,18 +452,25 @@ table.node-info tr td:last-child {
 	align-self: center;
 	align-items: center;
 	flex-direction: row;
-	flex-wrap: wrap;
+	/* one line that scrolls sideways when it doesn't fit (phones) */
+	flex-wrap: nowrap;
 	column-gap: 15px;
-	row-gap: 32px;
 	height: 30px;
 	width: 100%;
-	min-width: 700px;
+	box-sizing: border-box;
 	overflow-y: hidden;
 	overflow-x: auto;
+	overscroll-behavior-x: contain;
+	scrollbar-width: none;
+	white-space: nowrap;
 	color: #000;
 	background-color: #ffffff55;
 	backdrop-filter: blur(10px);
 	padding-left: 15px;
+}
+
+.stats > * {
+	flex-shrink: 0;
 }
 
 .stats > span {
@@ -148,6 +496,58 @@ table.node-info tr td:last-child {
 .stats a.github {
 	margin-right: 15px;
 }
+
+/* dark theme: elements with fixed light colours */
+body.dark .stats {
+	color: #fff;
+	background-color: #00000066;
+}
+body.dark .stats a.github img {
+	filter: invert(1);
+}
+body.dark .base-map-control,
+body.dark .map-button,
+body.dark .node-popup .maplibregl-popup-content {
+	background: var(--surface-container, #211f26);
+	color: var(--on-surface);
+}
+body.dark .node-popup.maplibregl-popup-anchor-bottom .maplibregl-popup-tip {
+	border-top-color: var(--surface-container, #211f26);
+}
+body.dark .node-popup.maplibregl-popup-anchor-top .maplibregl-popup-tip {
+	border-bottom-color: var(--surface-container, #211f26);
+}
+body.dark .maplibregl-popup .maplibregl-popup-close-button {
+	color: #bbb;
+}
+body.dark .maplibregl-popup .maplibregl-popup-close-button:hover {
+	color: #fff;
+}
+body.dark .maplibregl-ctrl.maplibregl-ctrl-attrib {
+	background-color: #000000a0;
+	color: #ddd;
+}
+/* links on the map (popup, attribution) look like links - beer.css resets them to plain text.
+   The popup rules must stay before the .coords-menu rules (same specificity), which override them
+   for the menu items; :where() keeps the dark variants from outranking those. The attribution
+   selector matches maplibre-gl.css's own. */
+.node-popup a,
+.maplibregl-ctrl.maplibregl-ctrl-attrib a {
+	color: #0078a8;
+	text-decoration: underline;
+}
+.node-popup a:hover,
+.maplibregl-ctrl.maplibregl-ctrl-attrib a:hover {
+	color: #005a7e;
+}
+:where(body.dark) .node-popup a,
+:where(body.dark) .maplibregl-ctrl.maplibregl-ctrl-attrib a {
+	color: #7cc4ff;
+}
+:where(body.dark) .node-popup a:hover,
+:where(body.dark) .maplibregl-ctrl.maplibregl-ctrl-attrib a:hover {
+	color: #b3dcff;
+}
 .search {
 	position: fixed;
 	z-index: 1000;
@@ -165,11 +565,6 @@ table.node-info tr td:last-child {
 .search .field {
 	width: 100%;
 	display: flex;
-}
-
-.search .submit {
-	width: 12px;
-	height: 35px;
 }
 
 .search .filter {
@@ -191,50 +586,159 @@ table.node-info tr td:last-child {
 	border-radius: 5px;
 }
 
-.leaflet-bottom {
+/* #map is 100vh tall, which on mobile can be taller than the visible area */
+.maplibregl-ctrl-bottom-left,
+.maplibregl-ctrl-bottom-right {
 	position: fixed !important;
 }
-.leaflet-control-layers-list {
-	margin-block-start: 0 !important;
+
+/* map buttons in the bottom-left corner: theme switch above the base map switcher */
+.base-map-control,
+.map-button {
+	background: #fff;
+	border-radius: 5px;
+	box-shadow: 0 1px 5px rgba(0, 0, 0, 0.4);
+	color: #333;
 }
-.leaflet-bottom .leaflet-control-layers {
+.base-map-control {
 	margin-bottom: 55px !important;
 }
-.marker-cluster span {
-	color: #000;
-	font-weight: 800;
+/* beer.css styles every <button>, this one looks like the base map switcher */
+.maplibregl-ctrl.map-button {
+	all: unset;
+	display: flex;
+	inline-size: 44px;
+	block-size: 44px;
+	align-items: center;
+	justify-content: center;
+	margin: 0 0 10px 10px;
+	background: #fff;
+	border-radius: 5px;
+	box-shadow: 0 1px 5px rgba(0, 0, 0, 0.4);
+	color: #333;
+	cursor: pointer;
+	pointer-events: auto;
+}
+body.dark .maplibregl-ctrl.map-button {
+	background: var(--surface-container, #211f26);
+	color: var(--on-surface);
+}
+.map-button:focus-visible {
+	outline: 2px solid var(--primary);
+	outline-offset: 2px;
+}
+.base-map-icon {
+	display: flex;
+	inline-size: 44px;
+	block-size: 44px;
+	align-items: center;
+	justify-content: center;
+}
+.base-map-list {
+	display: none;
+	flex-direction: column;
+	padding: 6px 10px 6px 6px;
+}
+.base-map-control:hover .base-map-icon,
+.base-map-control:focus-within .base-map-icon {
+	display: none;
+}
+.base-map-control:hover .base-map-list,
+.base-map-control:focus-within .base-map-list {
+	display: flex;
 }
 
-.leaflet-popup-close-button span {
+.node-popup .maplibregl-popup-content {
+	inline-size: 370px;
+	max-inline-size: calc(100vw - 20px);
+	padding: 12px 20px;
+	border-radius: 12px;
+	box-shadow: 0 3px 14px rgba(0, 0, 0, 0.4);
+}
+
+/* beer.css styles every <button>, undo that for the popup close button */
+.map-button::after,
+.maplibregl-popup .maplibregl-popup-close-button::after {
+	display: none;
+}
+
+.maplibregl-popup .maplibregl-popup-close-button {
+	all: unset;
+	position: absolute;
+	inset-block-start: 0;
+	inset-inline-end: 0;
+	padding: 0 8px;
 	font-size: 30px;
-	padding: 5px;
+	line-height: 1.2;
+	color: #757575;
+	cursor: pointer;
+}
+.maplibregl-popup .maplibregl-popup-close-button:hover {
+	color: #000;
 }
 
-.leaflet-container a.leaflet-popup-close-button {
-	width: auto !important;
-	height: auto !important;
+.coords-menu-wrap {
+	position: relative;
+	display: inline-block;
 }
 
-.leaflet-marker-icon.update-recent {
-	filter: saturate(5) hue-rotate(260deg)
+.coords-menu-toggle {
+	cursor: pointer;
 }
 
-.leaflet-marker-icon.update-stale {
-	filter: saturate(28) hue-rotate(228deg)
+.coords-menu {
+	display: none;
+	position: absolute;
+	left: 0;
+	top: 100%;
+	background: var(--surface, #fff);
+	border: 1px solid var(--outline-variant, #ccc);
+	border-radius: 4px;
+	box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+	z-index: 1000;
+	white-space: nowrap;
+	flex-direction: column;
 }
 
-.leaflet-marker-icon.update-old {
+.coords-menu-wrap.open .coords-menu {
+	display: flex;
+}
+
+.coords-menu a {
+	padding: 6px 12px;
+	text-decoration: none;
+	color: var(--on-surface, #333);
+}
+
+.coords-menu a:hover {
+	background: var(--surface-variant, #eee);
+}
+
+.status-dot {
+	display: inline-block;
+	width: 10px;
+	height: 10px;
+	border-radius: 50%;
+	background: #667b89;
+	margin-right: 6px;
+	vertical-align: middle;
+}
+
+.status-dot.update-recent {
+	filter: saturate(5) hue-rotate(260deg);
+}
+
+.status-dot.update-stale {
+	filter: saturate(28) hue-rotate(228deg);
+}
+
+.status-dot.update-old {
 	filter: saturate(5) hue-rotate(165deg);
 }
 
-.leaflet-marker-icon.update-extinct {
+.status-dot.update-extinct {
 	filter: grayscale(100) contrast(16);
 	opacity: 0.6;
-}
-
-.svg-node-icon {
-	background: none !important;
-	border: none !important;
 }
 
 time {
@@ -243,9 +747,234 @@ time {
 	text-decoration-style: dotted;
 }
 
+/* public key in the popup: shortened on short screens until tapped */
+.pkey-short {
+	display: none;
+}
+@media (max-height: 820px) {
+	.pkey:not(.expanded) {
+		cursor: pointer;
+	}
+	.pkey:not(.expanded) .pkey-short {
+		display: inline;
+		text-decoration: underline dotted;
+	}
+	.pkey:not(.expanded) .pkey-full {
+		display: none;
+	}
+}
+
+.node-qr {
+	display: block;
+	max-width: 120px;
+	height: auto;
+	margin: 0 auto 10px;
+}
+
 .user-actions {
 	display: flex;
+	flex-wrap: wrap;
 	justify-content: space-between;
+	gap: 6px 12px;
 	width: 100%;
 	margin-top: 15px;
+}
+
+#node-filter > li:hover {
+	background-color: unset;
+}
+
+#node-filter li.columns {
+	flex-direction:column;
+	gap:0;
+	align-items:start;
+}
+#node-filter li.columns label {
+	margin-left: 15px !important;
+}
+
+#node-filter li > span {
+	margin-bottom: 5px;
+}
+
+#node-filter li label.slider {
+	width: 100%;
+	margin: 15px 0;
+}
+/* point-to-point profile: a panel at the bottom of the screen */
+.profile-panel {
+	position: fixed;
+	/* above the map buttons */
+	z-index: 1000;
+	left: 50%;
+	bottom: 26px;
+	transform: translateX(-50%);
+	inline-size: min(960px, calc(100% - 20px));
+	max-block-size: min(60vh, 520px);
+	overflow-y: auto;
+	padding: 6px 8px 8px 16px;
+	border-radius: 8px;
+	background-color: var(--surface-container, #f3edf7);
+	color: var(--on-surface);
+	box-shadow: 0 2px 8px rgba(0,0,0,0.25);
+}
+.profile-header {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+.profile-header > i {
+	color: #1e88e5;
+}
+.profile-title {
+	flex: 1;
+	min-inline-size: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-size: 0.9rem;
+}
+.profile-end {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	inline-size: 18px;
+	block-size: 18px;
+	border-radius: 50%;
+	background: #1e88e5;
+	color: #fff;
+	font: bold 11px/1 system-ui, sans-serif;
+	vertical-align: middle;
+}
+.profile-title i.profile-arrow {
+	font-size: 16px;
+	vertical-align: -3px;
+	margin-inline: 4px;
+}
+.profile-hint {
+	color: var(--on-surface-variant);
+	font-size: 0.8rem;
+}
+.profile-settings {
+	display: grid;
+	grid-template-columns: auto 1fr auto 1fr;
+	align-items: center;
+	gap: 4px 12px;
+	margin-block: 4px 6px;
+	font-size: 0.85rem;
+}
+.profile-settings > div {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px;
+}
+.profile-settings .chip {
+	margin: 0;
+}
+.profile-settings .profile-radio {
+	grid-column: 2 / -1;
+}
+/* plain select (beer.css only styles the ones in a .field) */
+select.preset-select {
+	max-inline-size: 100%;
+	padding: 4px 8px;
+	border: 1px solid var(--outline);
+	border-radius: 8px;
+	background: var(--surface);
+	color: var(--on-surface);
+	font-size: 0.85rem;
+}
+/* picked points can be dragged */
+#map.plan-hover .maplibregl-canvas-container.maplibregl-interactive {
+	cursor: grab;
+}
+#map.plan-dragging .maplibregl-canvas-container.maplibregl-interactive {
+	cursor: grabbing;
+}
+@media (max-width: 700px) {
+	.profile-settings {
+		grid-template-columns: auto 1fr;
+	}
+	.profile-label {
+		display: none;
+	}
+	.profile-settings .chip {
+		padding-inline: 8px;
+		min-inline-size: 0;
+	}
+}
+.profile-chart {
+	display: block;
+	inline-size: 100%;
+	block-size: 220px;
+	border-radius: 6px;
+	touch-action: pan-y;
+	cursor: crosshair;
+}
+@media (max-height: 700px) {
+	.profile-chart {
+		block-size: 160px;
+	}
+}
+.profile-summary {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 2px 16px;
+	margin-block-start: 6px;
+	font-size: 0.8rem;
+}
+.profile-summary i {
+	font-size: 18px;
+	vertical-align: -4px;
+}
+.profile-status {
+	font-weight: bold;
+}
+.profile-status.clear i { color: #2e7d32; }
+.profile-status.fresnel i { color: #f9a825; }
+.profile-status.blocked i { color: #d32f2f; }
+.profile-margin.bars-3 i { color: #2e7d32; }
+.profile-margin.bars-2 i { color: #f9a825; }
+.profile-margin.bars-1 i { color: #d32f2f; }
+.profile-margin.bars-0 i { color: var(--on-surface-variant); }
+
+/* right click / long press menu on the map */
+.map-menu {
+	position: fixed;
+	z-index: 1001;
+	display: flex;
+	flex-direction: column;
+	min-inline-size: 200px;
+	padding: 4px 0;
+	border-radius: 8px;
+	background-color: var(--surface-container, #f3edf7);
+	color: var(--on-surface);
+	box-shadow: 0 2px 10px rgba(0,0,0,0.3);
+	font-size: 0.9rem;
+}
+.map-menu-coords {
+	padding: 4px 14px 6px;
+	font-size: 0.75rem;
+	color: var(--on-surface-variant);
+}
+/* plain menu rows, not beer.css buttons */
+.map-menu button {
+	all: unset;
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	padding: 8px 14px;
+	cursor: pointer;
+}
+.map-menu button::after {
+	display: none;
+}
+.map-menu button:hover,
+.map-menu button:focus-visible {
+	background: color-mix(in srgb, currentColor 10%, transparent);
+}
+.map-menu button i {
+	font-size: 20px;
+	color: var(--on-surface-variant);
 }
