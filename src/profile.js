@@ -1,7 +1,6 @@
 import { reactive } from '../lib/vue.esm-browser.prod.js';
 
 // Point-to-point profile between two ends, each a node ({ publicKey }) or a picked point ({ lat, lon })
-export const PROFILE_HEIGHTS = [2, 5, 10, 20, 30];
 
 export const profile = reactive({
 	a: null,

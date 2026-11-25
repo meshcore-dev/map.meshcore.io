@@ -1,5 +1,5 @@
 // Point-to-point profile chart: the terrain (raised by the earth's bulge, so the line of sight is
-// straight), trees on it, the line of sight between the antennas and the first Fresnel zone around it
+// straight), trees and buildings on it, the line of sight between the antennas and the first Fresnel zone around it
 
 const PADDING = { left: 54, right: 10, top: 10, bottom: 22 };
 const EARTH_RADIUS = 6371008.8;
@@ -14,6 +14,7 @@ const THEMES = {
 		terrain: '#b9a99a',
 		terrainEdge: '#8d7b6a',
 		trees: 'rgba(67, 160, 71, 0.75)',
+		buildings: '#7d8794',
 		fresnel: 'rgba(229, 57, 53, 0.13)',
 		fresnelEdge: 'rgba(229, 57, 53, 0.55)',
 		los: '#1e88e5',
@@ -28,6 +29,7 @@ const THEMES = {
 		terrain: '#6b5d52',
 		terrainEdge: '#a08c7b',
 		trees: 'rgba(76, 175, 80, 0.7)',
+		buildings: '#9aa5b4',
 		fresnel: 'rgba(239, 83, 80, 0.16)',
 		fresnelEdge: 'rgba(239, 83, 80, 0.6)',
 		los: '#64b5f6',
@@ -38,9 +40,10 @@ const THEMES = {
 };
 
 // Heights along the path (m above sea level, with the earth's bulge) for antenna heights a and b:
-// { x (m), bulge, ground, top (ground + trees), los, fresnel (first zone radius) } per sample
+// { x (m), bulge, ground, trees, buildings, estimated (building height is a guess),
+// top (ground + the higher of trees and buildings), los, fresnel (first zone radius) } per sample
 export function getProfileLines(result, heightA, heightB) {
-	const { elevations, trees, stepLength, distance, wavelength, refractionK } = result;
+	const { elevations, trees, buildings, buildingsEstimated, stepLength, distance, wavelength, refractionK } = result;
 	const last = elevations.length - 1;
 	const losA = elevations[0] + heightA, losB = elevations[last] + heightB;
 	const samples = [];
@@ -52,12 +55,33 @@ export function getProfileLines(result, heightA, heightB) {
 			x,
 			bulge,
 			ground,
-			top: ground + trees[i],
+			trees: trees[i],
+			buildings: buildings[i],
+			estimated: buildingsEstimated[i] === 1,
+			top: ground + Math.max(trees[i], buildings[i]),
 			los: losA + (losB - losA) * x / distance,
 			fresnel: Math.sqrt(wavelength * x * (distance - x) / distance),
 		});
 	}
 	return samples;
+}
+
+// Where the terrain, trees or buildings cut the line of sight: [[from, to], ...] as shares of the path (0-1)
+export function getBlockedRanges(samples) {
+	const last = samples.length - 1;
+	const ranges = [];
+	let start = null;
+	samples.forEach(({ top, los }, i) => {
+		const blocked = top > los;
+		if(blocked && start === null) start = i;
+		if(start !== null && (!blocked || i === last)) {
+			const end = blocked ? i : i - 1;
+			// half a sample on either side, so a single blocked sample shows too
+			ranges.push([Math.max(0, (start - 0.5) / last), Math.min(1, (end + 0.5) / last)]);
+			start = null;
+		}
+	});
+	return ranges;
 }
 
 // How free the path is: the least free share of the first Fresnel zone (1: clear, 0: the line of
@@ -133,12 +157,23 @@ export function drawProfileChart(canvas, samples, { dark = false, hover = null }
 	ctx.strokeStyle = theme.fresnelEdge;
 	ctx.stroke();
 
-	// trees, then the ground over them
+	// trees and buildings, then the ground over them
 	ctx.beginPath();
 	ctx.moveTo(toX(0), toY(low));
-	samples.forEach(({ x, top }) => ctx.lineTo(toX(x), toY(top)));
+	samples.forEach(({ x, ground, trees }) => ctx.lineTo(toX(x), toY(ground + trees)));
 	ctx.lineTo(toX(distance), toY(low));
 	ctx.fillStyle = theme.trees;
+	ctx.fill();
+	// each building as a block (a filled line would turn narrow buildings into spikes)
+	const halfStep = samples.length > 1 ? (samples[1].x - samples[0].x) / 2 : 0;
+	ctx.fillStyle = theme.buildings;
+	ctx.beginPath();
+	for(const { x, ground, buildings } of samples) {
+		if(buildings <= 0) continue;
+		const left = toX(Math.max(0, x - halfStep)), right = toX(Math.min(distance, x + halfStep));
+		const top = toY(ground + buildings);
+		ctx.rect(left, top, Math.max(1, right - left), toY(low) - top);
+	}
 	ctx.fill();
 	ctx.beginPath();
 	ctx.moveTo(toX(0), toY(low));
@@ -202,7 +237,7 @@ export function drawProfileChart(canvas, samples, { dark = false, hover = null }
 
 	// hovered spot
 	if(hover !== null && samples[hover]) {
-		const { x, bulge, ground, top, los } = samples[hover];
+		const { x, bulge, ground, trees, buildings, estimated, top, los } = samples[hover];
 		ctx.strokeStyle = theme.hover;
 		ctx.lineWidth = 1;
 		ctx.setLineDash([3, 3]);
@@ -212,10 +247,10 @@ export function drawProfileChart(canvas, samples, { dark = false, hover = null }
 		ctx.stroke();
 		ctx.setLineDash([]);
 
-		const trees = top - ground;
 		const lines = [
 			`${(x / 1000).toFixed(2)} km`,
 			`elevation ${Math.round(ground - bulge)} m${trees > 0.5 ? ` + ${Math.round(trees)} m trees` : ''}`,
+			...(buildings > 0 ? [`building ${Math.round(buildings)} m${estimated ? ' (height unknown, assumed)' : ''}`] : []),
 			`line of sight ${los - top >= 0 ? `${Math.round(los - top)} m above` : `${Math.round(top - los)} m below`}`,
 		];
 		ctx.font = '11px system-ui, sans-serif';

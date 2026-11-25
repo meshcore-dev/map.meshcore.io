@@ -1,8 +1,10 @@
 export const NODES_API_URL = 'https://map.meshcore.io/api/v1/nodes?binary=1&short=1';
 export const PRESETS_API_URL = 'https://api.meshcore.nz/api/v1/config';
+// MapTiler base maps (public key, only accepted from the site's domain: maps fail with HTTP 403 locally)
+export const MAPTILER_KEY = 'rW6swAgiEVwSUhHzOHRQ';
 // deletion requests are processed automatically by this recipient address (Gmail plus-addressing),
 // so the +tag has to survive; the subject is only a pre-filled courtesy
-export const DELETION_EMAIL = 'recrof+meshcore-map-delele@gmail.com';
+export const DELETION_EMAIL = 'recrof+meshcore-map-delete@gmail.com';
 export const DELETION_SUBJECT = 'MeshCore Map node deletion request';
 export const DELETION_MAX_NODES = 8;
 // keys sent in a deletion request are remembered (and left out of new requests) for this long

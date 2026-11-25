@@ -6,24 +6,30 @@ import {
 	isInDeletionRequest, removeFromDeletionRequest, toggleInDeletionRequest,
 } from './deletion.js';
 import {
-	COVERAGE_OPTIONS, FADE_MARGIN_DB as COVERAGE_FADE_MARGIN, RECEIVER as COVERAGE_RECEIVER,
+	ANTENNA_TYPES, BUILDINGS_MAX_DISTANCE, COVERAGE_OPTIONS, COVERAGE_SLIDERS, FADE_MARGIN_DB as COVERAGE_FADE_MARGIN, RECEIVER as COVERAGE_RECEIVER,
 	closeCoverage, computeCoverage, computeLinkProfile, coverage, releaseCoverage, getCoverageBounds, getCoverageRadio, getLinkBars,
 	getLocalRadioParams, getSensitivity, hasSameRadio, requestPointCoverage, applyCoverageSettings, encodeCoverageSettings, requestCoverage,
+	MAX_COVERAGE_SITES, addCoverageSite, closeAllCoverage, computeOverlap, selectCoverageSite,
 } from './coverage.js';
 import {
-	createHighlightLayer, createNodeLayer, createNodePopup, getNodeFocusZoom, interpolateMapLine, NODE_NAMES_ZOOM,
+	DirectionHandle, createHighlightLayer, createSearchPin, createNodeLayer, createNodePopup, getNodeFocusZoom, interpolateMapLine, NODE_NAMES_ZOOM,
 	setCoverageOverlay, setLinkQuality, setNodeNames, setPlanningOverlay,
 } from './map.js';
-import { PROFILE_HEIGHTS, addProfileEnd, closeProfile, profile, setProfileStart, swapProfileEnds } from './profile.js';
-import { drawProfileChart, getClearance, getProfileLines } from './profile-chart.js';
+import { addProfileEnd, closeProfile, profile, setProfileStart, swapProfileEnds } from './profile.js';
+import { drawProfileChart, getBlockedRanges, getClearance, getProfileLines } from './profile-chart.js';
 import { isDarkTheme, onThemeChange } from './theme.js';
 import { NodeSearchResults } from './node-search-results.js';
+import { SettingSlider } from './setting-slider.js';
+import { useDock } from './dock.js';
+import { createProfile3d } from './profile-3d.js';
+import { createCoverage3d } from './coverage-3d.js';
 import {
 	collectFrequencies, computeStats, fetchNodes, filterNodes, groupByType, prepareNode, searchNodes,
 } from './nodes.js';
+import { PLACE_SEARCH_DELAY_MS, PLACE_SEARCH_MIN_LENGTH, formatCoordinates, parseCoordinates, searchPlaces } from './places.js';
 import { findPresets, getRadioPresets, loadPresets, presetsLoaded } from './presets.js';
 import { clearMapPosition, decodeSite, encodeSite, getFiltersFromUrl, setMapPosition, writeUrlParams } from './url-state.js';
-import { forEachChunked } from './utils.js';
+import { compassPoint, forEachChunked } from './utils.js';
 const NODE_NAMES_STORAGE_KEY = 'showNodeNames';
 
 function loadShowNodeNames() {
@@ -53,7 +59,7 @@ function isDefaultFilter(state) {
 
 export function mountApp(selector, { map, urlParams }) {
 	return createApp({
-		components: { NodeSearchResults },
+		components: { NodeSearchResults, SettingSlider },
 		setup() {
 			const app = reactive({
 				...cloneDefaultFilters(),
@@ -90,6 +96,72 @@ export function mountApp(selector, { map, urlParams }) {
 				});
 			});
 
+			// coordinates typed or pasted into the search, offered as a point to go to
+			const searchPoint = computed(() => parseCoordinates(app.search));
+
+			// places (towns, streets, peaks, ...): looked up once typing stops, the ones near the map's
+			// centre first (only in view with "Search in current view only")
+			const searchPlaceResults = shallowRef([]);
+			let placeSearchTimer = null, placeSearchAbort = null;
+			watch([() => app.search, () => app.searchInViewport], ([query]) => {
+				clearTimeout(placeSearchTimer);
+				placeSearchAbort?.abort();
+				query = query.trim();
+				if(query.length < PLACE_SEARCH_MIN_LENGTH || searchPoint.value) {
+					searchPlaceResults.value = [];
+					return;
+				}
+				placeSearchTimer = setTimeout(async () => {
+					const abort = placeSearchAbort = new AbortController();
+					const { lng, lat } = map.getCenter();
+					const bounds = app.searchInViewport ? map.getBounds() : null;
+					try {
+						searchPlaceResults.value = await searchPlaces(query, {
+							near: { lat, lon: lng, zoom: map.getZoom() + 1 },
+							bounds: bounds && [Math.max(-180, bounds.getWest()), bounds.getSouth(), Math.min(180, bounds.getEast()), bounds.getNorth()],
+							signal: abort.signal,
+						});
+					} catch(error) {
+						if(error.name !== 'AbortError') {
+							console.error(error);
+							searchPlaceResults.value = [];
+						}
+					}
+				}, PLACE_SEARCH_DELAY_MS);
+			});
+			const showSearchResults = computed(() => app.searchFocused &&
+				(searchPoint.value || searchResults.value.length > 0 || searchPlaceResults.value.length > 0));
+
+			// clicking the pin opens the map menu for it
+			const searchPin = createSearchPin(map, {
+				onClick: ({ lat, lon }, label, ev) => openMapMenu({ lat, lng: lon }, ev.clientX, ev.clientY, label),
+			});
+			// flies to a picked point or place and pins it
+			function goToSearchResult({ lat, lon, zoom, bounds = null }, label) {
+				nodePopup.close();
+				app.search = '';
+				searchPlaceResults.value = [];
+				searchPin.show({ lat, lon }, label);
+				const camera = bounds && map.cameraForBounds(bounds, { padding: 40, maxZoom: 17 });
+				map.flyTo({
+					...(camera ? { center: camera.center, zoom: camera.zoom } : { center: [lon, lat], zoom }),
+					duration: NODE_FLY_DURATION_SECONDS * 1000,
+				});
+			}
+			const POINT_ZOOM = 14;
+			function onSearchPoint(point) {
+				goToSearchResult({ ...point, zoom: POINT_ZOOM }, formatCoordinates(point));
+			}
+			function onSearchPlace(place) {
+				goToSearchResult(place, [place.name, place.area].filter(Boolean).join(', '));
+			}
+			// Enter: the point if coordinates were typed, else the first result
+			function onSearchEnter() {
+				if(searchPoint.value) onSearchPoint(searchPoint.value);
+				else if(searchResults.value.length) onSearchSelect(searchResults.value[0]);
+				else if(searchPlaceResults.value.length) onSearchPlace(searchPlaceResults.value[0]);
+			}
+
 			const nodeLayer = createNodeLayer(map, { clusteringZoom: app.clusteringZoom, onNodeClick });
 			const deletionHighlight = createHighlightLayer(map);
 
@@ -114,6 +186,9 @@ export function mountApp(selector, { map, urlParams }) {
 					toggleInDeletionRequest(node.public_key);
 					return;
 				}
+				// a node with coverage shown: its settings in the panel
+				const site = coverage.sites.find(s => s.publicKey === node.public_key);
+				if(site) selectCoverageSite(site.id);
 				nodePopup.open(node);
 			}
 
@@ -330,12 +405,13 @@ export function mountApp(selector, { map, urlParams }) {
 
 			// A picked point as a coverage / profile site: the chosen radio preset, or the radio
 			// settings of the repeaters around it
-			function getPointSite({ lat, lon }, settings = coverage.settings) {
+			// (preset: the selected coverage site's, unless given)
+			function getPointSite({ lat, lon }, settings = coverage.settings, preset = selectedRadioPreset.value) {
 				return {
 					lat,
 					lon,
 					adv_name: `point ${lat.toFixed(5)}, ${lon.toFixed(5)}`,
-					params: selectedRadioPreset.value?.radio ?? getLocalRadioParams(lat, lon, nodes.value, settings),
+					params: preset?.radio ?? getLocalRadioParams(lat, lon, nodes.value, settings),
 					isPoint: true,
 				};
 			}
@@ -343,37 +419,176 @@ export function mountApp(selector, { map, urlParams }) {
 			// set while a dropped point gets its new position: the map stays where it is
 			let keepView = false;
 
-			// Repeater coverage: recomputed when the node or a setting changes; results of superseded
-			// requests are dropped
-			let coverageRequest = 0;
-			// the current estimate and the node it's for, to rate links to the visible nodes
-			let coverageResult = null;
-			const coverageNode = shallowRef(null);
-			// shows an estimate (null: none) and frees the previous one's image
-			function setCoverageResult(result, node) {
-				const previous = coverageResult;
-				coverageResult = result;
-				coverageNode.value = node;
-				setCoverageOverlay(map, result);
-				if(previous !== result) releaseCoverage(previous);
+			// Coverage of the sites: each is recomputed when its node, point, radio preset or a setting
+			// changes; results of superseded requests are dropped
+			// site id -> { key (what it was computed for), request, result }
+			const siteStates = new Map();
+			let nextCoverageRequest = 0;
+			// the shown estimates: [{ site, node, result }] in the sites' order
+			const coverageResults = shallowRef([]);
+			let overlapResult = null;
+			let overlapRequest = 0;
+
+			function getSiteNode(site) {
+				if(site.publicKey) return nodesByKey.value.get(site.publicKey) ?? null;
+				if(!site.point) return null;
+				const preset = radioPresets.value.find(p => p.name === site.radioPreset);
+				return getPointSite(site.point, site.settings, preset ?? null);
+			}
+
+			// a site's estimate is new or gone
+			function showCoverage() {
+				const results = [];
+				for(const site of coverage.sites) {
+					const state = siteStates.get(site.id);
+					if(state?.result) results.push({ site, node: state.node, result: state.result });
+				}
+				coverageResults.value = results;
+				drawCoverage();
 				updateLinkQuality();
 			}
-			// nodes in reach of the estimate (with the same radio settings): [{ node, bars }], null without an estimate
-			const reachableLinks = shallowRef(null);
+			// the selected site's radio shadow in the 3D view (experimental, off until switched on; remembered)
+			const coverage3d = createCoverage3d(map);
+			const coverageShadow3d = ref((() => { try { return localStorage.getItem('coverageShadow3d') === '1'; } catch { return false; } })());
+			watch(coverageShadow3d, on => {
+				try { localStorage.setItem('coverageShadow3d', on ? '1' : '0'); } catch {}
+				drawCoverage();
+			});
+			// the estimates on the map: the selected site's stronger, overlaps highlighted when asked for
+			function drawCoverage() {
+				coverage3d.set(coverageShadow3d.value && coverageResults.value.find(({ site }) => site.id === coverage.activeId)?.result.shadow || null);
+				setCoverageOverlay(map, {
+					sites: coverageResults.value.map(({ site, result }) => ({ id: site.id, active: site.id === coverage.activeId, result })),
+					overlap: coverage.highlightOverlaps ? overlapResult : null,
+				});
+			}
 
-			// "reachable only" display: just the repeater and the nodes in its reach, nothing clustered
+			// where two or more sites reach: worked out again when the estimates change
+			async function updateOverlap() {
+				const request = ++overlapRequest;
+				const results = coverageResults.value.map(({ result }) => result);
+				let overlap = null;
+				if(coverage.highlightOverlaps && results.length > 1) {
+					// let the map show the new estimates first
+					await new Promise(resolve => setTimeout(resolve, 50));
+					if(request !== overlapRequest) return;
+					overlap = await computeOverlap(results);
+				}
+				if(request !== overlapRequest) {
+					releaseCoverage(overlap);
+					return;
+				}
+				const previous = overlapResult;
+				overlapResult = overlap;
+				coverage.overlapKm2 = overlap ? Math.round(overlap.areaKm2) : coverage.highlightOverlaps && results.length > 1 ? 0 : null;
+				drawCoverage();
+				releaseCoverage(previous);
+			}
+			watch([coverageResults, () => coverage.highlightOverlaps], updateOverlap);
+			watch(() => coverage.activeId, drawCoverage);
+
+			// fits the map to sites' estimates ([{ node, distanceKm }]), with room for the panels around it
+			async function fitCoverage(sites) {
+				// the popup would cover the coverage area
+				nodePopup.close();
+				// the panels are docked beside the map: room for the stats bar and search box above
+				await nextTick();
+				const top = 110, bottom = 30;
+				const bounds = sites.map(({ node, distanceKm }) => getCoverageBounds(node.lon, node.lat, distanceKm));
+				map.fitBounds([
+					[Math.min(...bounds.map(b => b[0][0])), Math.min(...bounds.map(b => b[0][1]))],
+					[Math.max(...bounds.map(b => b[1][0])), Math.max(...bounds.map(b => b[1][1]))],
+				], {
+					padding: { top, bottom, left: 20, right: 20 },
+				});
+			}
+
+			async function computeSite(site, node, key) {
+				const request = ++nextCoverageRequest;
+				const state = siteStates.get(site.id) ?? {};
+				siteStates.set(site.id, { ...state, key, request });
+				const { nodeDisplay, ...settings } = site.settings;
+				site.name = node.adv_name;
+				site.radio = getCoverageRadio(node, settings);
+				site.loading = true;
+				site.error = '';
+				try {
+					const result = await computeCoverage(node, settings);
+					if(siteStates.get(site.id)?.request !== request) {
+						releaseCoverage(result);
+						return;
+					}
+					console.debug('coverage', JSON.stringify(result.stats));
+					releaseCoverage(siteStates.get(site.id).result);
+					siteStates.set(site.id, { key, request, node, result });
+					if(result.incomplete) site.error = 'Some terrain data could not be loaded, the estimate is incomplete.';
+					showCoverage();
+				} catch(e) {
+					if(siteStates.get(site.id)?.request !== request) return;
+					console.error(e);
+					releaseCoverage(siteStates.get(site.id).result);
+					siteStates.set(site.id, { key, request });
+					site.error = `Coverage could not be computed: ${e.message}`;
+					showCoverage();
+				} finally {
+					if(siteStates.get(site.id)?.request === request) site.loading = false;
+				}
+			}
+
+			watch(
+				// the display mode doesn't change the estimates
+				() => [coverage.sites.map(site => {
+					const { nodeDisplay, ...settings } = site.settings;
+					return { site, key: JSON.stringify([site.publicKey, site.point, settings, site.radioPreset]), node: getSiteNode(site) };
+				}), radioPresets.value],
+				([sites]) => {
+					// sites that are gone
+					const ids = new Set(sites.map(({ site }) => site.id));
+					let removed = false;
+					for(const [id, state] of siteStates) {
+						if(ids.has(id)) continue;
+						releaseCoverage(state.result);
+						siteStates.delete(id);
+						removed = true;
+					}
+					// sites to show on the map (all at once: a shared link brings several)
+					const toFit = [];
+					for(const { site, key, node } of sites) {
+						const state = siteStates.get(site.id);
+						if(state?.key === key) continue;
+						if(!node) {
+							// a node that isn't on the map (anymore)
+							if(site.publicKey && nodes.value.length) closeCoverage(site.id);
+							continue;
+						}
+						const previous = state?.key ? JSON.parse(state.key) : null;
+						// the map moves to a new site, a moved one (unless it was dragged) and a new distance
+						const moved = !previous || previous[0] !== site.publicKey || (JSON.stringify(previous[1]) !== JSON.stringify(site.point) && !keepView);
+						if(moved || previous[2].distanceKm !== site.settings.distanceKm) toFit.push({ node, distanceKm: site.settings.distanceKm });
+						computeSite(site, node, key);
+					}
+					if(toFit.length) fitCoverage(toFit);
+					if(removed) showCoverage();
+				},
+			);
+
+			// nodes in reach of any site's estimate (with the same radio settings): [{ node, bars }] with the
+			// best site's bars, null without estimates
+			const reachableLinks = shallowRef(null);
+			// the sites that are nodes (picked points have planning marks instead)
+			const siteNodes = computed(() => coverageResults.value.map(({ node }) => node).filter(node => !node.isPoint));
+
+			// "reachable only" display: just the sites and the nodes in their reach, nothing clustered
 			const showReachableOnly = computed(() => reachableLinks.value !== null && coverage.settings.nodeDisplay === 'reachable');
-			// (a picked point isn't a node: it has a planning mark instead)
 			const displayedNodes = computed(() => showReachableOnly.value
-				? [...(coverageNode.value?.isPoint ? [] : [coverageNode.value]), ...reachableLinks.value.map(link => link.node)]
+				? [...new Set([...siteNodes.value, ...reachableLinks.value.map(link => link.node)])]
 				: filteredNodes.value);
 
 			// badges after the nodes: they follow the nodes' placement (spread out ones)
 			watch([displayedNodes, showReachableOnly], ([nodes, reachableOnly]) => {
 				nodeLayer.setClustering(!reachableOnly, nodes);
 				// names only in the "reachable only" display, where there are few nodes to label
-				const source = coverageNode.value?.isPoint ? null : coverageNode.value;
-				setLinkQuality(map, reachableLinks.value ?? [], { labels: reachableOnly, source });
+				setLinkQuality(map, reachableLinks.value ?? [], { labels: reachableOnly, sources: siteNodes.value });
 			});
 
 			// the "reachable only" display has names of its own
@@ -384,92 +599,40 @@ export function mountApp(selector, { map, urlParams }) {
 				try { localStorage.setItem(NODE_NAMES_STORAGE_KEY, String(show)); } catch {}
 			});
 
-			// Link quality for visible nodes with the same radio settings as the estimate
+			// Link quality for visible nodes with the same radio settings as an estimate; the counts per site
 			function updateLinkQuality() {
-				if(!coverageResult) {
+				const results = coverageResults.value;
+				for(const site of coverage.sites) {
+					if(!results.some(r => r.site.id === site.id)) site.linkCounts = null;
+				}
+				if(!results.length) {
 					reachableLinks.value = null;
-					coverage.linkCounts = null;
 					return;
 				}
-				const links = [];
-				const counts = { 1: 0, 2: 0, 3: 0 };
-				for(const node of filteredNodes.value) {
-					if(node === coverageNode.value || !hasSameRadio(node, coverageResult.radio)) continue;
-					// repeaters and room servers are usually on roofs and masts, above the clutter
-					const margin = coverageResult.marginAt(node.lon, node.lat, { clutter: !ELEVATED_NODE_TYPES.has(node.type) });
-					const bars = margin === null ? 0 : getLinkBars(margin);
-					if(!bars) continue;
-					links.push({ node, bars });
-					counts[bars]++;
+				const best = new Map();
+				for(const { site, node: siteNode, result } of results) {
+					const counts = { 1: 0, 2: 0, 3: 0 };
+					for(const node of filteredNodes.value) {
+						if(node === siteNode || !hasSameRadio(node, result.radio)) continue;
+						// repeaters and room servers are usually on roofs and masts, above the clutter
+						const margin = result.marginAt(node.lon, node.lat, { clutter: !ELEVATED_NODE_TYPES.has(node.type) });
+						const bars = margin === null ? 0 : getLinkBars(margin);
+						if(!bars) continue;
+						counts[bars]++;
+						best.set(node, Math.max(best.get(node) ?? 0, bars));
+					}
+					site.linkCounts = counts;
 				}
-				reachableLinks.value = links;
-				coverage.linkCounts = counts;
+				// the sites themselves get no badge
+				for(const node of siteNodes.value) best.delete(node);
+				reachableLinks.value = [...best].map(([node, bars]) => ({ node, bars }));
 			}
 
 			// visible nodes changed (filters)
 			watch(filteredNodes, updateLinkQuality);
-			// the settings take a lot of room on short screens - start collapsed there
-			const coverageSettingsOpen = ref(innerHeight > 820);
 			// how the estimate is made: behind the (i) button
 			const coverageInfoOpen = ref(false);
 			const coverageSensitivity = computed(() => coverage.radio ? Math.round(getSensitivity(coverage.radio)) : null);
-
-			watch(
-				// the display mode doesn't change the estimate
-				[() => coverage.publicKey, () => coverage.point, () => { const { nodeDisplay, ...settings } = coverage.settings; return settings; }, selectedRadioPreset],
-				async ([publicKey, point, settings], [previousKey, previousPoint, previousSettings]) => {
-					const request = ++coverageRequest;
-					const node = publicKey ? nodesByKey.value.get(publicKey) : point ? getPointSite(point, settings) : null;
-					if(!node) {
-						setCoverageResult(null, null);
-						if(publicKey) closeCoverage();
-						return;
-					}
-
-					coverage.name = node.adv_name;
-					coverage.radio = getCoverageRadio(node, settings);
-					const moved = publicKey !== previousKey || (point !== previousPoint && !keepView);
-					if(moved || settings.distanceKm !== previousSettings?.distanceKm) {
-						// the popup would cover the coverage area
-						nodePopup.close();
-						// with the profile panel open too, there's little room left: settings collapsed
-						if(profile.a && moved) {
-							coverageSettingsOpen.value = false;
-							await nextTick();
-						}
-						// room for the stats bar, search box and coverage panel above, the profile panel below
-						// (with both open, the coverage area may go under the coverage panel)
-						const bottom = (document.querySelector('.profile-panel')?.offsetHeight ?? 0) + 30;
-						const top = Math.min(
-							document.querySelector('.coverage-panel')?.getBoundingClientRect().bottom + 20 || 260,
-							Math.max(110, map.getContainer().clientHeight - bottom - 150),
-						);
-						map.fitBounds(getCoverageBounds(node.lon, node.lat, settings.distanceKm), {
-							padding: { top, bottom, left: 20, right: 20 },
-						});
-					}
-
-					coverage.loading = true;
-					coverage.error = '';
-					try {
-						const result = await computeCoverage(node, settings);
-						if(request !== coverageRequest) {
-							releaseCoverage(result);
-							return;
-						}
-						console.debug('coverage', JSON.stringify(result.stats));
-						setCoverageResult(result, node);
-						if(result.incomplete) coverage.error = 'Some terrain data could not be loaded, the estimate is incomplete.';
-					} catch(e) {
-						if(request !== coverageRequest) return;
-						console.error(e);
-						setCoverageResult(null, null);
-						coverage.error = `Coverage could not be computed: ${e.message}`;
-					} finally {
-						if(request === coverageRequest) coverage.loading = false;
-					}
-				},
-			);
 
 			// --- Point-to-point profile ---
 
@@ -511,8 +674,8 @@ export function mountApp(selector, { map, urlParams }) {
 					if(endsChanged && !keepView) {
 						nodePopup.close();
 						map.fitBounds([[Math.min(a.lon, b.lon), Math.min(a.lat, b.lat)], [Math.max(a.lon, b.lon), Math.max(a.lat, b.lat)]], {
-							// room for the search box above and the profile panel (with its chart) below
-							padding: { top: 110, left: 40, right: 40, bottom: Math.min(innerHeight * 0.6, 520) + 40 },
+							// room for the search box above (the profile panel is docked beside the map)
+							padding: { top: 110, left: 40, right: 40, bottom: 40 },
 							maxZoom: 13,
 						});
 					}
@@ -529,7 +692,7 @@ export function mountApp(selector, { map, urlParams }) {
 						console.debug('profile', JSON.stringify(result.stats));
 						const samples = getProfileLines(result, heightA, heightB);
 						profileView.value = {
-							result, samples, clearance: getClearance(samples), radio,
+							result, samples, clearance: getClearance(samples), blocked: getBlockedRanges(samples), radio,
 							ends: [a, b], heights: [heightA, heightB], bars: getLinkBars(result.margin),
 							sensitivity: Math.round(getSensitivity(radio)),
 						};
@@ -545,18 +708,18 @@ export function mountApp(selector, { map, urlParams }) {
 				},
 			);
 
-			// the profile panel's height, for the coverage panel above it (CSS --profile-panel-height)
-			const profilePanelResize = new ResizeObserver(([entry]) => {
-				document.body.style.setProperty('--profile-panel-height', `${entry.target.offsetHeight}px`);
+			// the coverage and profile panels, docked to a side of the screen
+			const dockOpen = computed(() => (coverage.sites.length > 0 || !!profile.a) && !deletionRequest.pickingOnMap);
+			const { dock, dockSide, dockSides, setDockSide, startDockResize, toggleDockCollapsed } = useDock(() => dockOpen.value);
+			// something new to show (a site added, a profile end picked): the collapsed dock opens
+			watch([() => coverage.sites.length, () => profile.a, () => profile.b], ([sites, a, b], [previousSites, previousA, previousB]) => {
+				if(sites > previousSites || (a && a !== previousA) || (b && b !== previousB)) dock.collapsed = false;
 			});
-			watch(() => !!profile.a, open => nextTick(() => {
-				const panel = document.querySelector('.profile-panel');
-				if(open && panel) profilePanelResize.observe(panel);
-				else {
-					profilePanelResize.disconnect();
-					document.body.style.removeProperty('--profile-panel-height');
-				}
-			}));
+			// the X in the dock's bar: everything in it
+			function closeDock() {
+				closeAllCoverage();
+				closeProfile();
+			}
 
 			// the chart: redrawn on new data, hover, theme and size changes
 			const profileCanvas = ref(null);
@@ -582,59 +745,92 @@ export function mountApp(selector, { map, urlParams }) {
 				profileHover.value = null;
 			}
 
-			// planning marks on the map: the coverage point, the profile ends, the hovered spot
-			// a picked point being dragged: { label, lngLat }
+			// planning marks on the map: the coverage sites that are picked points (numbered when there are
+			// several sites), the profile ends with the line between them (red where the line of sight is
+			// blocked) and the hovered spot
+			// marks are told apart by a key: 'A', 'B' or the coverage site's id
+			const markKey = ({ label, site }) => site ?? label;
+			// a picked point being dragged: { key, lngLat }
 			const dragPreview = shallowRef(null);
+			const siteLabel = site => coverage.sites.length > 1 ? String(coverage.sites.indexOf(site) + 1) : '';
+			// the profile through the air in the 3D view
+			const profile3d = createProfile3d(map);
 			watch(
-				[() => coverage.point, profileEnds, profileHover, profileView, dragPreview],
-				([point, [a, b], hover, view, drag]) => {
-					const at = (label, end) => drag?.label === label ? drag.lngLat : end && [end.lon, end.lat];
+				[() => coverage.sites.map(site => [site, site.point, siteLabel(site)]), profileEnds, profileHover, profileView, dragPreview],
+				([sites, [a, b], hover, view, drag]) => {
+					const at = (key, end) => drag?.key === key ? drag.lngLat : end && [end.lon, end.lat];
 					const points = [];
-					for(const [label, end] of [['', point], ['A', a], ['B', b]]) {
+					for(const [site, point, label] of sites) {
+						const lngLat = at(site.id, point);
+						if(lngLat) points.push({ lngLat, label, site: site.id });
+					}
+					for(const [label, end] of [['A', a], ['B', b]]) {
 						const lngLat = at(label, end);
 						if(lngLat) points.push({ lngLat, label });
 					}
 					const lineA = at('A', a), lineB = at('B', b);
 					const line = lineA && lineB ? [lineA, lineB] : null;
-					const hoverPoint = line && view && hover !== null && !drag
+					// the profile is for this line (not one being dragged or still being computed)
+					const current = line && view && !drag && sameSpot(view.ends[0], a) && sameSpot(view.ends[1], b);
+					const hoverPoint = current && hover !== null
 						? interpolateMapLine(line[0], line[1], hover / (view.samples.length - 1))
 						: null;
-					setPlanningOverlay(map, { points, line, hover: hoverPoint });
+					setPlanningOverlay(map, { points, line, blocked: current ? view.blocked : [], hover: hoverPoint });
+					profile3d.set(current ? { a: line[0], b: line[1], samples: view.samples, hover } : null);
 				},
 			);
 
-			// Picked points (not nodes) can be dragged around; the profile / coverage follows on release
-			function getDraggableEnd(label) {
-				if(label === 'A') return profile.a?.publicKey ? null : profile.a;
-				if(label === 'B') return profile.b?.publicKey ? null : profile.b;
-				return coverage.point;
+			// turn handle of a directional antenna, on the selected coverage site
+			const directionHandle = new DirectionHandle(map, bearing => { coverage.settings.direction = bearing; });
+			watch(
+				[() => coverage.settings.antennaType, () => coverage.settings.direction, () => coverage.activeId, () => coverage.publicKey, () => coverage.point, dragPreview],
+				([type, direction, activeId, publicKey, point, drag]) => {
+					const site = publicKey ? nodesByKey.value.get(publicKey) : point;
+					const lngLat = !site ? null : drag?.key === activeId && point ? drag.lngLat : [site.lon, site.lat];
+					directionHandle.update(type !== 'omni' ? lngLat : null, direction);
+				},
+				{ immediate: true },
+			);
+
+			// Picked points (not nodes) can be dragged around; the profile / coverage follows on release.
+			// A coverage site's point that's clicked (not moved) gets selected.
+			function getDraggableEnd(key) {
+				if(key === 'A') return profile.a?.publicKey ? null : profile.a;
+				if(key === 'B') return profile.b?.publicKey ? null : profile.b;
+				return coverage.sites.find(site => site.id === key)?.point ?? null;
 			}
 			let dragging = null;
 			function startDrag(ev) {
-				const label = ev.features?.[0]?.properties.label ?? '';
-				if(!getDraggableEnd(label)) return;
+				const feature = ev.features?.[0];
+				const key = feature ? markKey(feature.properties) : null;
+				if(key === null || !getDraggableEnd(key)) return;
 				ev.preventDefault();
 				clearTimeout(pressTimer);
 				closeMapMenu();
-				dragging = { label };
-				dragPreview.value = { label, lngLat: [ev.lngLat.lng, ev.lngLat.lat] };
+				dragging = { key, start: ev.point, moved: false };
+				dragPreview.value = { key, lngLat: [ev.lngLat.lng, ev.lngLat.lat] };
 				map.getContainer().classList.add('plan-dragging');
 			}
 			function moveDrag(ev) {
 				if(!dragging) return;
-				dragPreview.value = { label: dragging.label, lngLat: [ev.lngLat.lng, ev.lngLat.lat] };
+				// a few pixels of jitter are still a click
+				if(!dragging.moved && Math.hypot(ev.point.x - dragging.start.x, ev.point.y - dragging.start.y) < 4) return;
+				dragging.moved = true;
+				dragPreview.value = { key: dragging.key, lngLat: [ev.lngLat.lng, ev.lngLat.lat] };
 			}
 			function endDrag() {
 				if(!dragging) return;
-				const { label } = dragging;
+				const { key, moved } = dragging;
 				const [lon, lat] = dragPreview.value.lngLat;
 				dragging = null;
-				map.getContainer().classList.remove('plan-dragging');
-				keepView = true;
-				if(label === 'A') profile.a = { lat, lon };
-				else if(label === 'B') profile.b = { lat, lon };
-				else coverage.point = { lat, lon };
 				dragPreview.value = null;
+				map.getContainer().classList.remove('plan-dragging');
+				if(typeof key === 'number') selectCoverageSite(key);
+				if(!moved) return;
+				keepView = true;
+				if(key === 'A') profile.a = { lat, lon };
+				else if(key === 'B') profile.b = { lat, lon };
+				else coverage.point = { lat, lon };
 				// the watchers run before the next render
 				nextTick(() => { keepView = false; });
 			}
@@ -648,14 +844,15 @@ export function mountApp(selector, { map, urlParams }) {
 			map.on('touchend', endDrag);
 			// grab cursor over the points that can be moved
 			map.on('mousemove', 'planning-points', ev => {
-				map.getContainer().classList.toggle('plan-hover', !!getDraggableEnd(ev.features[0].properties.label ?? ''));
+				map.getContainer().classList.toggle('plan-hover', !!getDraggableEnd(markKey(ev.features[0].properties)));
 			});
 			map.on('mouseleave', 'planning-points', () => map.getContainer().classList.remove('plan-hover'));
 
 			// --- Map menu: right click (long press on touch screens) anywhere on the map ---
-			const mapMenu = reactive({ open: false, x: 0, y: 0, lat: 0, lon: 0 });
-			function openMapMenu(lngLat, clientX, clientY) {
-				Object.assign(mapMenu, { open: true, x: clientX, y: clientY, lat: lngLat.lat, lon: lngLat.lng });
+			// pin: the label of the search pin it was opened on (it can be removed from the menu)
+			const mapMenu = reactive({ open: false, x: 0, y: 0, lat: 0, lon: 0, pin: null });
+			function openMapMenu(lngLat, clientX, clientY, pin = null) {
+				Object.assign(mapMenu, { open: true, x: clientX, y: clientY, lat: lngLat.lat, lon: lngLat.lng, pin });
 				// keep it on screen
 				nextTick(() => {
 					const menu = document.querySelector('.map-menu');
@@ -703,6 +900,10 @@ export function mountApp(selector, { map, urlParams }) {
 				addProfileEnd({ lat: mapMenu.lat, lon: mapMenu.lon });
 				closeMapMenu();
 			}
+			function mapMenuRemovePin() {
+				searchPin.clear();
+				closeMapMenu();
+			}
 			function mapMenuCopy() {
 				navigator.clipboard.writeText(`${mapMenu.lat.toFixed(5)}, ${mapMenu.lon.toFixed(5)}`);
 				closeMapMenu();
@@ -713,36 +914,56 @@ export function mountApp(selector, { map, urlParams }) {
 				if(value === null || value === undefined || value === '') delete app.urlParams[key];
 				else app.urlParams[key] = value;
 			}
+			// coverage sites, their settings and presets: one value per site, separated by ';'; the selected
+			// site's number (from 1) with several of them; the profile uses the selected site's settings
+			// and preset (or the ones new sites start with)
 			watch(
 				[
-					() => coverage.publicKey ?? encodeSite(coverage.point), () => encodeSite(profile.a), () => encodeSite(profile.b),
-					() => `${profile.heightA},${profile.heightB}`, () => encodeCoverageSettings(coverage.settings), () => coverage.radioPreset,
+					() => coverage.sites.map(site => site.publicKey ?? encodeSite(site.point)).join(';'),
+					() => encodeSite(profile.a), () => encodeSite(profile.b), () => `${profile.heightA},${profile.heightB}`,
+					() => (coverage.sites.length ? coverage.sites.map(site => site.settings) : [coverage.settings]).map(encodeCoverageSettings).join(';'),
+					() => (coverage.sites.length ? coverage.sites.map(site => site.radioPreset) : [coverage.radioPreset]).join(';'),
+					() => coverage.sites.length > 1 ? coverage.sites.findIndex(site => site.id === coverage.activeId) + 1 : null,
+					() => coverage.sites.length > 1 && coverage.highlightOverlaps,
 				],
-				([coverageSite, a, b, heights, settings, preset]) => {
-					// the profile uses the coverage settings and the preset too
-					const planning = !!(coverageSite || a);
-					setUrlParam('cov', coverageSite);
+				([sites, a, b, heights, settings, presets, active, overlaps]) => {
+					const planning = !!(sites || a);
+					setUrlParam('cov', sites);
 					setUrlParam('pa', a);
 					setUrlParam('pb', a ? b : null);
 					setUrlParam('ph', a ? heights : null);
 					setUrlParam('covs', planning ? settings : null);
-					setUrlParam('preset', planning ? preset : null);
+					setUrlParam('preset', planning && presets.replaceAll(';', '') ? presets : null);
+					setUrlParam('cova', active);
+					setUrlParam('covo', overlaps ? 1 : null);
 				},
 			);
 			// a shared link: its settings, coverage and profile (once the nodes are there)
 			function applySharedPlanning(params) {
-				if(params.covs) applyCoverageSettings(params.covs);
+				const settings = String(params.covs ?? '').split(';');
 				// no preset in a shared link: the nearby repeaters' settings, like for whoever shared it
-				if(params.cov || params.pa) coverage.radioPreset = params.preset ?? '';
-				const [heightA, heightB] = String(params.ph ?? '').split(',').map(Number);
-				if(PROFILE_HEIGHTS.includes(heightA)) profile.heightA = heightA;
-				if(PROFILE_HEIGHTS.includes(heightB)) profile.heightB = heightB;
+				const presets = String(params.preset ?? '').split(';');
+				const sites = String(params.cov ?? '').split(';').map(decodeSite).filter(Boolean).slice(0, MAX_COVERAGE_SITES);
+				if(!sites.length) {
+					if(params.covs) applyCoverageSettings(settings[0]);
+					if(params.pa) coverage.radioPreset = presets[0];
+				}
+				sites.forEach((site, i) => {
+					const added = addCoverageSite(site.publicKey ? site : { point: site });
+					applyCoverageSettings(settings[i] ?? settings[0], added.settings);
+					added.radioPreset = presets[i] ?? '';
+				});
+				const active = coverage.sites[Number(params.cova) - 1];
+				if(active) selectCoverageSite(active.id);
+				coverage.highlightOverlaps = params.covo === '1';
+				// (no heights in the URL: the defaults stay - an empty value would read as 0)
+				const [heightA, heightB] = params.ph ? String(params.ph).split(',').map(Number) : [];
+				const { min, max } = COVERAGE_SLIDERS.antennaHeight;
+				if(Number.isInteger(heightA) && heightA >= min && heightA <= max) profile.heightA = heightA;
+				if(Number.isInteger(heightB) && heightB >= min && heightB <= max) profile.heightB = heightB;
 				const a = decodeSite(params.pa), b = decodeSite(params.pb);
 				if(a) profile.a = a;
 				if(a && b) profile.b = b;
-				const site = decodeSite(params.cov);
-				if(site?.publicKey) requestCoverage(site.publicKey);
-				else if(site) requestPointCoverage(site.lat, site.lon);
 			}
 
 			function showNode(node) {
@@ -819,12 +1040,13 @@ export function mountApp(selector, { map, urlParams }) {
 
 			return {
 				app, stats, searchResults, filtersActive,
-				onSearchSelect, clearFilters,
-				coverage, closeCoverage, coverageOptions: COVERAGE_OPTIONS, coverageReceiver: COVERAGE_RECEIVER, coverageFadeMargin: COVERAGE_FADE_MARGIN,
-				coverageSensitivity, coverageSettingsOpen, coverageInfoOpen,
-				profile, profileEnds, profileView, profileHeights: PROFILE_HEIGHTS, profileCanvas, onChartPointer, onChartLeave,
+				onSearchSelect, clearFilters, closeAllCoverage, selectCoverageSite, searchPoint, searchPlaceResults, showSearchResults, onSearchPoint, onSearchPlace, onSearchEnter,
+				coverage, closeCoverage, compassPoint, coverageOptions: COVERAGE_OPTIONS, coverageSliders: COVERAGE_SLIDERS, coverageAntennaTypes: ANTENNA_TYPES, coverageReceiver: COVERAGE_RECEIVER, coverageFadeMargin: COVERAGE_FADE_MARGIN, buildingsMaxKm: BUILDINGS_MAX_DISTANCE / 1000,
+				coverageSensitivity, coverageInfoOpen, coverageShadow3d,
+				dockOpen, dock, dockSide, dockSides, setDockSide, startDockResize, toggleDockCollapsed, closeDock,
+				profile, profileEnds, profileView, profileCanvas, onChartPointer, onChartLeave,
 				closeProfile, swapProfileEnds, coveragePresets, profilePresets, profileUsesPreset,
-				mapMenu, mapMenuCoverage, mapMenuProfileFrom, mapMenuProfileTo, mapMenuCopy,
+				mapMenu, mapMenuCoverage, mapMenuRemovePin, mapMenuProfileFrom, mapMenuProfileTo, mapMenuCopy,
 				nodeNamesZoom: NODE_NAMES_ZOOM,
 				deletionRequest, deletionDialog, composeLinks, userAction, copiedField, copyText, onDeletionDialogClose,
 				deletionNodes, deletionSearch, deletionSearchResults, selectDeletionNode, onDeletionSearchEsc,

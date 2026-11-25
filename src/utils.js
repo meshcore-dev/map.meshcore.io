@@ -119,3 +119,10 @@ export function applyCssFilter(imageData, filter, alpha = 1) {
 	}
 	return imageData;
 }
+
+const COMPASS_POINTS = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW'];
+
+// Bearing (degrees) as one of the 16 compass points: N, NNE, NE, ... NNW
+export function compassPoint(bearing) {
+	return COMPASS_POINTS[Math.round((((bearing % 360) + 360) % 360) / 22.5) % 16];
+}

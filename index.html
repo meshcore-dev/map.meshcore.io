@@ -123,18 +123,23 @@
 						</li>
 					</menu>
 					<div class="field border no-margin">
-						<input type="text" class="background" list="nodes" v-model="app.search" placeholder="Search Nodes" @focus="app.searchFocused = true" @blur="app.searchFocused = false" @keydown.esc="app.searchFocused = false; $event.target.blur()">
+						<input type="text" class="background" list="nodes" v-model="app.search" placeholder="Search nodes, places or lat, lon" @focus="app.searchFocused = true" @blur="app.searchFocused = false" @keydown.esc="app.searchFocused = false; $event.target.blur()" @keydown.down.prevent="$refs.searchResults?.move(1)" @keydown.up.prevent="$refs.searchResults?.move(-1)" @keydown.enter.prevent="$refs.searchResults?.pick() || onSearchEnter()">
 						<button type="button" class="filter" :class="{ circle: !filtersActive, transparent: !filtersActive, 'error-container': filtersActive }" @click.stop="app.filterOpen = !app.filterOpen">
 							<i>filter_alt</i>
 							<span v-if="filtersActive">Filters active</span>
 						</button>
 					</div>
 					<node-search-results
-						v-if="app.searchFocused && searchResults.length > 0"
+						ref="searchResults"
+						v-if="showSearchResults"
 						:results="searchResults"
 						:query="app.search"
 						:is-selected="deletionRequest.pickingOnMap ? isInDeletionRequest : null"
+						:point="searchPoint"
+						:places="searchPlaceResults"
 						@select="onSearchSelect"
+						@select-point="onSearchPoint"
+						@select-place="onSearchPlace"
 					></node-search-results>
 				</form>
 				<div class="deletion-picker" v-if="deletionRequest.pickingOnMap">
@@ -145,23 +150,54 @@
 						<span>Done</span>
 					</button>
 				</div>
-				<div class="coverage-panel" v-if="(coverage.publicKey || coverage.point) && !deletionRequest.pickingOnMap">
+				<!-- coverage and profile panels: docked to a side of the screen (the map takes the rest),
+				     movable and resizable like Chrome's developer tools -->
+				<div v-if="dockOpen" :class="['dock', 'dock-' + dockSide, { resizing: dock.resizing, collapsed: dock.collapsed }]">
+					<div v-if="!dock.collapsed" class="dock-resize" title="Drag to resize" @pointerdown="startDockResize"></div>
+					<div class="dock-bar">
+						<button type="button" class="dock-title" :aria-expanded="!dock.collapsed" :title="dock.collapsed ? 'Show the panel' : 'Hide the panel'" @click="toggleDockCollapsed">
+							<span>{{ coverage.sites.length && profile.a ? 'Coverage & profile' : coverage.sites.length ? 'Coverage' : 'Profile' }}</span>
+							<i>{{ (dockSide === 'bottom') === dock.collapsed ? 'expand_less' : 'expand_more' }}</i>
+						</button>
+						<button v-for="side in dockSides" :key="side.value" type="button"
+							:class="['dock-side', 'circle', 'transparent', 'small', { active: dock.side === side.value }]" :title="side.title" :aria-pressed="dock.side === side.value"
+							@click="setDockSide(side.value)">
+							<i>{{ side.icon }}</i>
+						</button>
+						<button type="button" class="dock-close circle transparent small" :title="coverage.sites.length && profile.a ? 'Close the coverage and profile' : coverage.sites.length ? 'Hide coverage' : 'Close the profile'" @click="closeDock">
+							<i>close</i>
+						</button>
+					</div>
+					<div class="dock-panels" v-show="!dock.collapsed">
+				<div class="coverage-panel" v-if="coverage.sites.length && !deletionRequest.pickingOnMap">
 					<div class="coverage-header">
 						<i>cell_tower</i>
 						<span class="coverage-title">Coverage of <b>{{ coverage.name }}</b></span>
 						<progress v-if="coverage.loading" class="circle small"></progress>
-						<button type="button" class="circle transparent small" title="Hide coverage" @click="closeCoverage">
+						<button v-if="coverage.sites.length > 1 || profile.a" type="button" class="circle transparent small" :title="coverage.sites.length > 1 ? 'Remove this site' : 'Hide coverage'" @click="closeCoverage()">
 							<i>close</i>
 						</button>
 					</div>
-					<button type="button" class="chip small coverage-summary" :aria-expanded="coverageSettingsOpen" @click="coverageSettingsOpen = !coverageSettingsOpen">
-						<i>{{ coverageSettingsOpen ? 'expand_less' : 'tune' }}</i>
-						<span>
-							{{ coverage.radio?.freq ?? coverage.settings.frequency }} MHz · {{ coverage.settings.txPower }} dBm ·
-							{{ coverage.settings.antennaGain }} dBi · {{ coverage.settings.antennaHeight }} m · {{ coverage.settings.distanceKm }} km
-						</span>
-					</button>
-					<div class="coverage-settings" v-show="coverageSettingsOpen">
+					<div class="coverage-sites" v-if="coverage.sites.length > 1">
+						<button v-for="(site, i) in coverage.sites" :key="site.id" type="button"
+							:class="['chip', 'small', 'coverage-site', { fill: site.id === coverage.activeId }]"
+							:title="site.name + (site.id === coverage.activeId ? '' : ' (click to change its settings)')" @click="selectCoverageSite(site.id)">
+							<b>{{ i + 1 }}</b>
+							<span class="coverage-site-name">{{ !site.publicKey ? 'point' : site.name.length > 16 ? site.name.slice(0, 15) + '…' : site.name }}</span>
+							<progress v-if="site.loading" class="circle tiny"></progress>
+						</button>
+						<span class="max"></span>
+						<button type="button" :class="['chip', 'small', 'coverage-overlaps', { fill: coverage.highlightOverlaps }]"
+							:aria-pressed="coverage.highlightOverlaps" title="Highlight where two or more sites reach handhelds"
+							@click="coverage.highlightOverlaps = !coverage.highlightOverlaps">
+							<i>join</i>
+							<span>Overlaps<template v-if="coverage.highlightOverlaps && coverage.overlapKm2 !== null">: {{ coverage.overlapKm2.toLocaleString() }} km²</template></span>
+						</button>
+						<button type="button" class="circle transparent small" title="Remove all sites" @click="closeAllCoverage">
+							<i>delete_sweep</i>
+						</button>
+					</div>
+					<div class="coverage-settings">
 						<template v-if="coverage.point">
 							<span>Radio</span>
 							<div>
@@ -178,23 +214,24 @@
 								@click="coverage.settings.frequency = option.value">{{ option.label }}</button>
 						</div>
 						<span>TX power</span>
+						<setting-slider v-model="coverage.settings.txPower" v-bind="coverageSliders.txPower"></setting-slider>
+						<span>Antenna</span>
 						<div>
-							<button v-for="value in coverageOptions.txPower" :key="value" type="button"
-								:class="['chip', 'small', { fill: coverage.settings.txPower === value }]"
-								@click="coverage.settings.txPower = value">{{ value }} dBm</button>
+							<button v-for="option in coverageOptions.antennaType" :key="option.value" type="button"
+								:class="['chip', 'small', { fill: coverage.settings.antennaType === option.value }]"
+								:title="option.title"
+								@click="coverage.settings.antennaType = option.value">{{ option.label }}</button>
 						</div>
+						<template v-if="coverage.settings.antennaType !== 'omni'">
+							<span title="Half-power (-3 dB) beam width">Beam width</span>
+							<setting-slider v-model="coverage.settings.beamWidth" v-bind="coverageSliders.beamWidth"></setting-slider>
+							<span title="Where the antenna points (bearing, 0° = north)">Direction</span>
+							<setting-slider v-model="coverage.settings.direction" v-bind="coverageSliders.direction" compass></setting-slider>
+						</template>
 						<span>Antenna gain</span>
-						<div>
-							<button v-for="value in coverageOptions.antennaGain" :key="value" type="button"
-								:class="['chip', 'small', { fill: coverage.settings.antennaGain === value }]"
-								@click="coverage.settings.antennaGain = value">{{ value }} dBi</button>
-						</div>
+						<setting-slider v-model="coverage.settings.antennaGain" v-bind="coverageSliders.antennaGain"></setting-slider>
 						<span>Antenna height</span>
-						<div>
-							<button v-for="value in coverageOptions.antennaHeight" :key="value" type="button"
-								:class="['chip', 'small', { fill: coverage.settings.antennaHeight === value }]"
-								@click="coverage.settings.antennaHeight = value">{{ value }} m</button>
-						</div>
+						<setting-slider v-model="coverage.settings.antennaHeight" v-bind="coverageSliders.antennaHeight"></setting-slider>
 						<span>Buildings &amp; trees</span>
 						<div>
 							<button v-for="option in coverageOptions.clutter" :key="String(option.value)" type="button"
@@ -221,18 +258,22 @@
 								:class="['chip', 'small', { fill: coverage.settings.distanceKm === value }]"
 								@click="coverage.settings.distanceKm = value">{{ value }} km</button>
 						</div>
-					</div>
-					<div class="coverage-legend">
-						<span>strong</span>
-						<span class="coverage-gradient"></span>
-						<span>weak</span>
+						<span title="In the 3D view: a see-through sheet over the radio shadow, at the height the line of sight to the antenna passes there">3D shadow <span class="experimental">beta</span></span>
+						<div>
+							<button v-for="option in [{ value: false, label: 'Off' }, { value: true, label: 'On' }]" :key="String(option.value)" type="button"
+								:class="['chip', 'small', { fill: coverageShadow3d === option.value }]"
+								:title="option.value ? 'In the 3D view: how high above the ground the line of sight to the antenna passes in the radio shadow (light blue: a few metres, blue, violet: up to 150 m)' : ''"
+								@click="coverageShadow3d = option.value">{{ option.label }}</button>
+						</div>
 					</div>
 					<p v-if="coverage.linkCounts" class="coverage-links">
 						<template v-if="coverage.linkCounts[1] + coverage.linkCounts[2] + coverage.linkCounts[3]">
 							Nodes in reach with the same radio settings:
-							<span class="coverage-link-count bars-3"><i>signal_cellular_alt</i>{{ coverage.linkCounts[3] }}</span>
-							<span class="coverage-link-count bars-2"><i>signal_cellular_alt_2_bar</i>{{ coverage.linkCounts[2] }}</span>
-							<span class="coverage-link-count bars-1"><i>signal_cellular_alt_1_bar</i>{{ coverage.linkCounts[1] }}</span>
+							<span class="coverage-link-counts">
+								<span class="coverage-link-count bars-3"><i>signal_cellular_alt</i>{{ coverage.linkCounts[3] }}</span>
+								<span class="coverage-link-count bars-2"><i>signal_cellular_alt_2_bar</i>{{ coverage.linkCounts[2] }}</span>
+								<span class="coverage-link-count bars-1"><i>signal_cellular_alt_1_bar</i>{{ coverage.linkCounts[1] }}</span>
+							</span>
 						</template>
 						<template v-else>No visible nodes with the same radio settings in reach.</template>
 					</p>
@@ -246,6 +287,16 @@
 						handhelds in built-up areas and forests lose 18-22 dB to the buildings and trees around them (ITU-R P.2108),
 						repeaters and room servers are taken to be above them</template>.
 						Single buildings and reflections are not taken into account.
+						<template v-if="coverageShadow3d">
+							3D shadow (experimental): in the 3D view, a see-through sheet over the radio shadow shows how high above the ground
+							the line of sight to the antenna passes there (light blue: a few metres, blue, violet: up to 150 m) - line of sight only,
+							the signal also bends into part of the shadow.
+						</template>
+						<template v-if="coverage.settings.antennaType !== 'omni'">
+							The {{ coverage.settings.antennaType }} antenna has a simplified horizontal pattern: {{ coverage.settings.beamWidth }}° wide main lobe (-3 dB at its edges),
+							side lobes {{ coverageAntennaTypes[coverage.settings.antennaType].sideLobe }} dB<template v-if="coverage.settings.antennaType === 'yagi'"> and a back lobe {{ coverageAntennaTypes.yagi.frontToBack }} dB</template> below the front;
+							the dashed line shows where it points. Vertical pattern is not modelled.
+						</template>
 					</p>
 					<div class="coverage-credits">
 						<button type="button" class="coverage-info" :class="{ active: coverageInfoOpen }" :aria-expanded="coverageInfoOpen"
@@ -254,6 +305,7 @@
 						</button>
 						<span>
 							Elevation: <a href="https://mapterhorn.com/attribution" target="_blank" rel="noopener">© Mapterhorn</a>,
+							<a href="https://github.com/tilezen/joerd/blob/master/docs/attribution.md" target="_blank" rel="noopener">Terrain Tiles</a>,
 							forests &amp; buildings: <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">© OpenStreetMap</a>
 						</span>
 					</div>
@@ -271,23 +323,15 @@
 						<button type="button" class="circle transparent small" title="Swap the ends" :disabled="!profile.b" @click="swapProfileEnds">
 							<i>swap_horiz</i>
 						</button>
-						<button type="button" class="circle transparent small" title="Close the profile" @click="closeProfile">
+						<button v-if="coverage.sites.length" type="button" class="circle transparent small" title="Close the profile" @click="closeProfile">
 							<i>close</i>
 						</button>
 					</div>
 					<div class="profile-settings">
 						<span><span class="profile-end">A</span><span class="profile-label"> antenna</span></span>
-						<div>
-							<button v-for="value in profileHeights" :key="value" type="button"
-								:class="['chip', 'small', { fill: profile.heightA === value }]"
-								@click="profile.heightA = value">{{ value }} m</button>
-						</div>
+						<setting-slider v-model="profile.heightA" v-bind="coverageSliders.antennaHeight"></setting-slider>
 						<span><span class="profile-end">B</span><span class="profile-label"> antenna</span></span>
-						<div>
-							<button v-for="value in profileHeights" :key="value" type="button"
-								:class="['chip', 'small', { fill: profile.heightB === value }]"
-								@click="profile.heightB = value">{{ value }} m</button>
-						</div>
+						<setting-slider v-model="profile.heightB" v-bind="coverageSliders.antennaHeight"></setting-slider>
 						<template v-if="profileUsesPreset">
 							<span>Radio</span>
 							<div class="profile-radio">
@@ -310,7 +354,7 @@
 								link margin <b>{{ profileView.result.margin >= 0 ? '+' : '' }}{{ profileView.result.margin.toFixed(1) }} dB</b>
 							</span>
 							<span>{{ (profileView.result.distance / 1000).toFixed(1) }} km</span>
-							<span>A→B {{ profileView.result.bearing.toFixed(1) }}°, B→A {{ profileView.result.backBearing.toFixed(1) }}°</span>
+							<span>A→B {{ profileView.result.bearing.toFixed(1) }}° {{ compassPoint(profileView.result.bearing) }}, B→A {{ profileView.result.backBearing.toFixed(1) }}° {{ compassPoint(profileView.result.backBearing) }}</span>
 							<span>A {{ Math.round(profileView.result.elevations[0]) }} m + {{ profileView.heights[0] }} m, B {{ Math.round(profileView.result.elevations.at(-1)) }} m + {{ profileView.heights[1] }} m</span>
 							<span :title="`free space ${profileView.result.losses.freeSpace.toFixed(1)} dB, terrain ${profileView.result.losses.diffraction.toFixed(1)} dB, clutter ${(profileView.result.losses.clutterA + profileView.result.losses.clutterB).toFixed(1)} dB`">
 								path loss <b>{{ profileView.result.losses.total.toFixed(1) }} dB</b>
@@ -321,19 +365,25 @@
 						</div>
 						<p class="coverage-note">
 							{{ profileView.radio.freq }} MHz, SF{{ profileView.radio.sf }}, {{ profileView.radio.bw }} kHz,
-							{{ coverage.settings.txPower }} dBm and {{ coverage.settings.antennaGain }} dBi on both ends (coverage settings),
+							{{ coverage.settings.txPower }} dBm and {{ coverage.settings.antennaGain }} dBi on both ends (coverage settings)<template v-if="coverage.settings.antennaType !== 'omni'">, antennas aimed at each other</template>,
 							receiver sensitivity {{ profileView.sensitivity }} dBm with {{ coverageFadeMargin }} dB fade margin.
+							<template v-if="profileView.result.withBuildings">Buildings from OpenStreetMap (5 m where the height isn't known) count for the line of sight; the path loss takes them in through the clutter only.</template>
+							<template v-else>Buildings are left out on paths over {{ buildingsMaxKm }} km.</template>
 							Same model as the coverage estimate<template v-if="coverage.settings.clutter">, with buildings &amp; trees around antennas below them</template><template v-if="coverage.settings.ridgeRounding > 0"> and {{ coverage.settings.ridgeRounding * 100 }} % rounded ridges</template>.
 						</p>
 					</template>
 					<p v-if="profile.error" class="coverage-error">{{ profile.error }}</p>
 				</div>
+					</div>
+				</div>
 				<div class="map-menu" v-if="mapMenu.open" :style="{ left: mapMenu.x + 'px', top: mapMenu.y + 'px' }" @contextmenu.prevent>
+					<div v-if="mapMenu.pin" class="map-menu-label">{{ mapMenu.pin }}</div>
 					<div class="map-menu-coords">{{ mapMenu.lat.toFixed(5) }}, {{ mapMenu.lon.toFixed(5) }}</div>
 					<button type="button" @click="mapMenuCoverage"><i>cell_tower</i>Coverage from here</button>
 					<button type="button" @click="mapMenuProfileFrom"><i>trip_origin</i>Profile from here</button>
 					<button type="button" v-if="profile.a" @click="mapMenuProfileTo"><i>place</i>Profile to here</button>
 					<button type="button" @click="mapMenuCopy"><i>content_copy</i>Copy coordinates</button>
+					<button type="button" v-if="mapMenu.pin" @click="mapMenuRemovePin"><i>location_off</i>Remove pin</button>
 				</div>
 				<dialog ref="deletionDialog" class="deletion-dialog" @close="onDeletionDialogClose">
 					<nav>
@@ -398,7 +448,9 @@
 										@focus="deletionSearch.focused = true"
 										@blur="deletionSearch.focused = false"
 										@keydown.esc="onDeletionSearchEsc"
-										@keydown.enter.prevent="deletionSearchResults.length && selectDeletionNode(deletionSearchResults[0])"
+										@keydown.down.prevent="$refs.deletionResults?.move(1)"
+										@keydown.up.prevent="$refs.deletionResults?.move(-1)"
+										@keydown.enter.prevent="$refs.deletionResults?.pick() || deletionSearchResults.length && selectDeletionNode(deletionSearchResults[0])"
 									>
 								</div>
 								<button type="button" class="border small-round" title="Add nodes from the map" @click="startPickingOnMap">
@@ -486,6 +538,7 @@
 					<!-- outside the steps: the results popover has to exist whenever the search does -->
 					<div ref="deletionResultsPopover" popover="manual" class="deletion-search-popover">
 						<node-search-results
+							ref="deletionResults"
 							v-if="showDeletionResults"
 							:results="deletionSearchResults"
 							:query="deletionSearch.query"

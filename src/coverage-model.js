@@ -4,10 +4,14 @@
 // hills (ITU-R P.526).
 // Elevation comes from Mapterhorn terrain tiles (terrarium encoded, 512px, web mercator) - bare ground
 // in many countries, so forests (OpenStreetMap, from OpenFreeMap's vector tiles) are added on top.
-import { readPolygons } from './mvt.js';
+// Tiles Mapterhorn can't serve come from AWS Terrain Tiles (same encoding, 256px, mostly SRTM).
+import { readPolygonFeatures, readPolygons } from './mvt.js';
 
 const TERRAIN_TILE_URL = 'https://tiles.mapterhorn.com/{z}/{x}/{y}.webp';
 const TERRAIN_TILE_SIZE = 512;
+// fallback: a 512px tile at zoom z is 2 × 2 of these at zoom z + 1
+const FALLBACK_TERRAIN_TILE_URL = 'https://elevation-tiles-prod.s3.amazonaws.com/terrarium/{z}/{x}/{y}.png';
+const FALLBACK_TERRAIN_TILE_SIZE = 256;
 const TERRAIN_MAX_ZOOM = 12;
 // enough for the largest estimate (~50 tiles), with room for switching between nodes and settings
 const TERRAIN_CACHE_TILES = 128;
@@ -20,6 +24,15 @@ const VECTOR_TILEJSON_URL = 'https://tiles.openfreemap.org/planet';
 const VECTOR_MIN_ZOOM = 7;
 const VECTOR_MAX_ZOOM = 14;
 const VECTOR_CACHE_TILES = 32;
+// Buildings (profile only) come from the most detailed vector tiles, with heights from OpenStreetMap
+// (height, or building:levels × 3.66 m); buildings without either get BUILDING_DEFAULT_HEIGHT
+const BUILDINGS_ZOOM = 14;
+const BUILDINGS_CACHE_TILES = 64;
+const BUILDING_DEFAULT_HEIGHT = 5;
+// longer paths would need too many tiles (a tile is about 2.4 km × cos(latitude) across)
+export const BUILDINGS_MAX_DISTANCE = 30000;
+// buildings this close to an end are the antenna's own (it's on the roof or next to it), not obstacles
+const BUILDING_CLEARANCE = 10;
 // Canopy height added to forests (HamnetDB uses 30 m on top of SRTM, which partly has the canopy already).
 // Trees get lower up high and stop at the tree line: full height up to 1000 m, none at 2000 m.
 const FOREST_HEIGHT = 25;
@@ -53,9 +66,34 @@ const EARTH_CIRCUMFERENCE = 40075016.686;
 const REFRACTION_K = 4 / 3;
 
 const SIGNAL_RGB = [220, 38, 38];
+// radio shadow for the 3D view: cells about this big (m), at most this many across the estimate's square
+const SHADOW_CELL_METERS = 150;
+const SHADOW_MAX_CELLS = 512;
 // link margin (dB) shown at full strength; the colour fades from there down to 0 dB
 const FULL_MARGIN_DB = 45;
 const MAX_ALPHA = 0.85, MIN_ALPHA = 0.1;
+
+// Simplified horizontal antenna patterns: gain (dB, relative to the peak) by the angle off the pointing
+// direction. Main lobe as in 3GPP TR 36.814: -12 (angle / beam width)² dB, so -3 dB at half the beam
+// width, down to the side lobe level. A yagi also has a back lobe ("tail") around 180°, front-to-back
+// ratio about 15 dB; a panel (patch / micro-strip, with a ground plane) has a deep, flat back.
+// The vertical pattern is left out: antennas are taken to be aimed at the horizon.
+export const ANTENNA_TYPES = {
+	omni: null,
+	yagi: { sideLobe: 20, frontToBack: 15 },
+	panel: { sideLobe: 25, frontToBack: 25 },
+};
+
+export function antennaPatternGain({ antennaType, beamWidth, direction }, bearing) {
+	const type = ANTENNA_TYPES[antennaType];
+	if(!type) return 0;
+	// 0-180°
+	const off = Math.abs(((((bearing - direction) % 360) + 540) % 360) - 180);
+	const main = -12 * (off / beamWidth) ** 2;
+	// the back lobe is a bit wider than the main one
+	const back = -type.frontToBack - 12 * ((180 - off) / (beamWidth * 1.5)) ** 2;
+	return Math.max(main, back, -type.sideLobe);
+}
 
 // Receiver sensitivity (dBm) for LoRa with the given bandwidth (kHz) and spreading factor
 export function getSensitivity({ bw, sf }) {
@@ -78,15 +116,28 @@ function loadTerrainTile(z, x, y) {
 	return promise;
 }
 
-async function fetchTerrainTile(z, x, y) {
-	const url = TERRAIN_TILE_URL.replace('{z}', z).replace('{x}', x).replace('{y}', y);
+async function fetchImage(url) {
 	const res = await fetch(url);
-	if(!res.ok) throw new Error(`Terrain tile ${z}/${x}/${y}: HTTP ${res.status}`);
-	const bitmap = await createImageBitmap(await res.blob());
+	if(!res.ok) throw new Error(`${url}: HTTP ${res.status}`);
+	return createImageBitmap(await res.blob());
+}
 
+function tileUrl(template, z, x, y) {
+	return template.replace('{z}', z).replace('{x}', x).replace('{y}', y);
+}
+
+// Elevations (m) of a terrain tile, row by row
+async function fetchTerrainTile(z, x, y) {
 	const canvas = new OffscreenCanvas(TERRAIN_TILE_SIZE, TERRAIN_TILE_SIZE);
 	const ctx = canvas.getContext('2d', { willReadFrequently: true });
-	ctx.drawImage(bitmap, 0, 0);
+	try {
+		ctx.drawImage(await fetchImage(tileUrl(TERRAIN_TILE_URL, z, x, y)), 0, 0);
+	} catch(error) {
+		console.warn(`Terrain tile ${z}/${x}/${y} from Mapterhorn failed (${error.message}), using AWS Terrain Tiles`);
+		const quarters = await Promise.all([0, 1, 2, 3].map(i =>
+			fetchImage(tileUrl(FALLBACK_TERRAIN_TILE_URL, z + 1, x * 2 + (i & 1), y * 2 + (i >> 1)))));
+		quarters.forEach((bitmap, i) => ctx.drawImage(bitmap, (i & 1) * FALLBACK_TERRAIN_TILE_SIZE, (i >> 1) * FALLBACK_TERRAIN_TILE_SIZE));
+	}
 	const { data } = ctx.getImageData(0, 0, TERRAIN_TILE_SIZE, TERRAIN_TILE_SIZE);
 
 	// terrarium: elevation = R * 256 + G + B / 256 - 32768
@@ -107,21 +158,27 @@ const URBAN_LANDUSE = new Set(['commercial', 'industrial', 'retail']);
 const SUBURBAN_LANDUSE = new Set(['residential', 'suburb', 'quarter', 'neighbourhood']);
 const OPEN_LANDCOVER = new Set(['farmland', 'grass', 'wetland', 'sand', 'rock', 'ice']);
 
+async function fetchVectorTile(z, x, y) {
+	if(!vectorTileUrl) {
+		vectorTileUrl = fetch(VECTOR_TILEJSON_URL).then(res => {
+			if(!res.ok) throw new Error(`Vector tiles: HTTP ${res.status}`);
+			return res.json();
+		}).then(tilejson => tilejson.tiles[0]);
+		vectorTileUrl.catch(() => { vectorTileUrl = null; });
+	}
+	const url = (await vectorTileUrl).replace('{z}', z).replace('{x}', x).replace('{y}', y);
+	const res = await fetch(url);
+	if(!res.ok) throw new Error(`Vector tile ${z}/${x}/${y}: HTTP ${res.status}`);
+	return res.arrayBuffer();
+}
+
 // Land cover polygons of one vector tile: { extent, forest, open, suburban, urban } (rings)
 function loadLandCoverTile(z, x, y) {
 	const key = `${z}/${x}/${y}`;
 	let promise = vectorCache.get(key);
 	if(!promise) {
 		promise = (async () => {
-			vectorTileUrl ??= fetch(VECTOR_TILEJSON_URL).then(res => {
-				if(!res.ok) throw new Error(`Vector tiles: HTTP ${res.status}`);
-				return res.json();
-			}).then(tilejson => tilejson.tiles[0]);
-			vectorTileUrl.catch(() => { vectorTileUrl = null; });
-			const url = (await vectorTileUrl).replace('{z}', z).replace('{x}', x).replace('{y}', y);
-			const res = await fetch(url);
-			if(!res.ok) throw new Error(`Vector tile ${key}: HTTP ${res.status}`);
-			const buffer = await res.arrayBuffer();
+			const buffer = await fetchVectorTile(z, x, y);
 			const { extent, rings: forest } = readPolygons(buffer, 'landcover', properties => properties.class === 'wood');
 			return {
 				extent,
@@ -136,6 +193,98 @@ function loadLandCoverTile(z, x, y) {
 		promise.catch(() => vectorCache.delete(key));
 	}
 	return promise;
+}
+
+const buildingsCache = new Map();
+
+// Buildings of one BUILDINGS_ZOOM tile: { extent, buildings: [{ height, rings }] }. Tiles merge the
+// buildings with the same properties into one feature; outlines drawn in 3D by their parts are left out
+// (the parts are there too).
+function loadBuildingsTile(x, y) {
+	const key = `${x}/${y}`;
+	let promise = buildingsCache.get(key);
+	if(!promise) {
+		promise = fetchVectorTile(BUILDINGS_ZOOM, x, y).then(buffer => {
+			const { extent, features } = readPolygonFeatures(buffer, 'building', properties => !properties.hide_3d);
+			return {
+				extent,
+				buildings: features.map(({ properties, rings }) => ({ height: properties.render_height ?? BUILDING_DEFAULT_HEIGHT, rings })),
+			};
+		});
+		buildingsCache.set(key, promise);
+		if(buildingsCache.size > BUILDINGS_CACHE_TILES) buildingsCache.delete(buildingsCache.keys().next().value);
+		promise.catch(() => buildingsCache.delete(key));
+	}
+	return promise;
+}
+
+// Where the line from a to b (BUILDINGS_ZOOM tile units) runs through buildings: [{ from, to, height }]
+// with from / to as shares of the line (0-1). Exact intersections with the outlines, so buildings
+// narrower than the profile's samples count too.
+async function loadBuildingSpans(ax, ay, bx, by) {
+	const length = Math.hypot(bx - ax, by - ay);
+	// tiles under the line, checked every 1/8 of a tile
+	const keys = new Set();
+	const checks = Math.ceil(length * 8) + 1;
+	for(let i = 0; i <= checks; i++) {
+		keys.add(`${Math.floor(ax + (bx - ax) * i / checks)},${Math.floor(ay + (by - ay) * i / checks)}`);
+	}
+	const across = 2 ** BUILDINGS_ZOOM;
+	let failed = 0;
+	const spans = [];
+	await Promise.all([...keys].map(async key => {
+		const [tx, ty] = key.split(',').map(Number);
+		if(ty < 0 || ty >= across) return;
+		let tile;
+		try {
+			tile = await loadBuildingsTile(((tx % across) + across) % across, ty);
+		} catch(error) {
+			console.error(error);
+			failed++;
+			return;
+		}
+		// the line in the tile's coordinates; only its part inside the tile counts (tiles overlap a bit)
+		const { extent } = tile;
+		const x0 = (ax - tx) * extent, y0 = (ay - ty) * extent;
+		const dx = (bx - ax) * extent, dy = (by - ay) * extent;
+		const [inFrom, inTo] = clipToSquare(x0, y0, dx, dy, extent);
+		if(inFrom >= inTo) return;
+		for(const { height, rings } of tile.buildings) {
+			// crossings of the (endless) line with the outlines, even-odd: entering and leaving alternate
+			const crossings = [];
+			for(const ring of rings) {
+				const n = ring.length;
+				for(let i = 0, j = n - 2; i < n; j = i, i += 2) {
+					const px = ring[j] - x0, py = ring[j + 1] - y0, qx = ring[i] - x0, qy = ring[i + 1] - y0;
+					const sideP = dx * py - dy * px, sideQ = dx * qy - dy * qx;
+					if((sideP > 0) === (sideQ > 0)) continue;
+					const ex = qx - px, ey = qy - py;
+					crossings.push((px * ey - py * ex) / (dx * ey - dy * ex));
+				}
+			}
+			crossings.sort((p, q) => p - q);
+			for(let i = 0; i + 1 < crossings.length; i += 2) {
+				const from = Math.max(crossings[i], inFrom), to = Math.min(crossings[i + 1], inTo);
+				if(from < to) spans.push({ from, to, height });
+			}
+		}
+	}));
+	return { spans, tiles: keys.size - failed, failed };
+}
+
+// The part of the line (x0, y0) + t (dx, dy), t in [0, 1], inside the square [0, size]²: [from, to]
+function clipToSquare(x0, y0, dx, dy, size) {
+	let from = 0, to = 1;
+	for(const [p, d] of [[x0, dx], [y0, dy]]) {
+		if(d === 0) {
+			if(p < 0 || p >= size) return [1, 0];
+			continue;
+		}
+		const t0 = (0 - p) / d, t1 = (size - p) / d;
+		from = Math.max(from, Math.min(t0, t1));
+		to = Math.min(to, Math.max(t0, t1));
+	}
+	return [from, to];
 }
 
 // Land cover of the square [left, left + size) x [top, top + size) in world pixels at the terrain
@@ -435,6 +584,14 @@ export async function computeCoverageGrid({ lat, lon, settings, radio, rounding 
 	const profile = new Float64Array(radius + 1);
 	const lag = Math.max(1, Math.ceil(FOREST_CLEARANCE / metersPerPixel));
 	const { forest: cover } = landCover;
+	// radio shadow (3D view): how high above the ground the line of sight from the antenna passes (m),
+	// on a coarse grid; averaged over the samples in a cell, with their ground elevation
+	// (no smaller than the terrain's pixels)
+	const shadowCells = Math.min(SHADOW_MAX_CELLS, size, Math.ceil(size * metersPerPixel / SHADOW_CELL_METERS));
+	const shadowCell = size / shadowCells;
+	const shadowDepth = new Float32Array(shadowCells * shadowCells);
+	const shadowGround = new Float32Array(shadowCells * shadowCells);
+	const shadowCount = new Uint32Array(shadowCells * shadowCells);
 	Object.assign(ray, {
 		profile,
 		metersPerStep: metersPerPixel,
@@ -444,6 +601,8 @@ export async function computeCoverageGrid({ lat, lon, settings, radio, rounding 
 	for(let r = 0; r < rays; r++) {
 		const angle = 2 * Math.PI * r / rays;
 		const dx = Math.cos(angle), dy = Math.sin(angle);
+		// directional antennas: the ray's bearing (web mercator keeps angles; y grows southwards)
+		const rayMaxPathLoss = maxPathLoss + antennaPatternGain(settings, (Math.atan2(dx, -dy) * 180 / Math.PI + 360) % 360);
 		// the antenna is the hull's first point; heights are relative to it
 		hullD[0] = 0;
 		hullH[0] = 0;
@@ -480,14 +639,26 @@ export async function computeCoverageGrid({ lat, lon, settings, radio, rounding 
 			}
 			ray.lastStep = Math.max(0, p);
 
+			// the line of sight over the steepest obstacle so far (the hull's first corner)
+			const lineOfSight = n >= 2 ? d * hullH[1] / hullD[1] : -Infinity;
+			const cell = Math.min(shadowCells - 1, Math.floor(fy / shadowCell)) * shadowCells + Math.min(shadowCells - 1, Math.floor(fx / shadowCell));
+			shadowDepth[cell] += Math.max(0, lineOfSight - ground);
+			shadowGround[cell] += elevation;
+			shadowCount[cell]++;
+
 			const loss = 20 * Math.log10(d / 1000) + fsplConstant +
 				diffractionLoss(hullD, hullH, n, d, ground + RECEIVER.height, wavelength);
-			const margin = maxPathLoss - loss;
+			const margin = rayMaxPathLoss - loss;
 			const index = Math.round(fy) * size + Math.round(fx);
 			if(margin > margins[index]) margins[index] = margin;
 		}
 	}
 	margins[cy * size + cx] = maxPathLoss;
+	for(let i = 0; i < shadowCount.length; i++) {
+		const count = shadowCount[i];
+		shadowDepth[i] = count ? shadowDepth[i] / count : NaN;
+		shadowGround[i] = count ? shadowGround[i] / count : NaN;
+	}
 	// clutter type per pixel: the receiver's loss is applied where it's needed (the map image for
 	// handhelds; nodes on roofs and masts are above it)
 	const clutter = new Uint8Array(size * size);
@@ -509,18 +680,14 @@ export async function computeCoverageGrid({ lat, lon, settings, radio, rounding 
 		pixels[i * 4 + 2] = SIGNAL_RGB[2];
 		pixels[i * 4 + 3] = Math.round(255 * (MIN_ALPHA + (MAX_ALPHA - MIN_ALPHA) * strength));
 	}
+	// (the estimate's edge and a directional antenna's direction are map lines: see map.js)
 	ctx.putImageData(image, 0, 0);
-	ctx.strokeStyle = `rgba(${SIGNAL_RGB.join(',')}, 0.8)`;
-	ctx.lineWidth = 6;
-	ctx.setLineDash([24, 16]);
-	ctx.beginPath();
-	ctx.arc(cx + 0.5, cy + 0.5, radius - 1.5, 0, Math.PI * 2);
-	ctx.stroke();
 
 	const blob = await canvas.convertToBlob({ type: 'image/png' });
 
 	return {
 		grid: { margins, clutter, clutterLosses: clutterLosses.receiver, left, top, size, worldSize, cx, cy, radius },
+		shadow: { depth: shadowDepth, ground: shadowGround, cells: shadowCells, left, top, size, worldSize },
 		blob,
 		coordinates: [
 			toLngLat(left, top, worldSize),
@@ -576,7 +743,7 @@ function distanceAndBearing(a, b) {
 
 // Terrain profile and link budget between two antennas (a, b: { lat, lon, height, gain }), with
 // the same model as the coverage estimate (both ends may be among clutter). Returns the samples
-// (distance, ground elevation, tree height), the antennas' elevations, distance, bearings and losses.
+// (distance, ground elevation, tree and building heights), the antennas' elevations, distance, bearings and losses.
 export async function computeProfile({ a, b, settings, radio, rounding = 0 }) {
 	const { distance, bearing } = distanceAndBearing(a, b);
 	const backBearing = distanceAndBearing(b, a).bearing;
@@ -624,7 +791,12 @@ export async function computeProfile({ a, b, settings, radio, rounding = 0 }) {
 	const started = performance.now();
 	let failed = 0;
 	const terrainTiles = new Map(), vectorTiles = new Map();
+	const withBuildings = distance <= BUILDINGS_MAX_DISTANCE;
+	const buildingsScale = 2 ** BUILDINGS_ZOOM / worldSize;
+	let buildingSpans = { spans: [], tiles: 0, failed: 0 };
 	await Promise.all([
+		withBuildings && loadBuildingSpans(ax * buildingsScale, ay * buildingsScale, bx * buildingsScale, by * buildingsScale)
+			.then(result => { buildingSpans = result; failed += result.failed; }),
 		...[...terrainKeys].map(key => {
 			const [tx, ty] = key.split(',').map(Number);
 			return loadTerrainTile(zoom, tx, ty).then(tile => terrainTiles.set(key, tile), error => { console.error(error); failed++; });
@@ -664,6 +836,22 @@ export async function computeProfile({ a, b, settings, radio, rounding = 0 }) {
 
 	const elevations = new Float32Array(steps + 1);
 	const trees = new Float32Array(steps + 1);
+	// highest building at each sample (its share of the path, half a step either way). Shown and used for
+	// the line of sight only: as diffracting edges, rooftops would add some 50 dB over a few km of city,
+	// far more than measured (signals get around and between buildings), the clutter loss covers them.
+	const buildings = new Float32Array(steps + 1);
+	const buildingsEstimated = new Uint8Array(steps + 1);
+	const clearance = BUILDING_CLEARANCE / distance;
+	for(const { from, to, height } of buildingSpans.spans) {
+		if(from <= clearance || to >= 1 - clearance) continue;
+		const first = Math.max(0, Math.ceil(from * steps - 0.5)), last = Math.min(steps, Math.floor(to * steps + 0.5));
+		for(let i = first; i <= last; i++) {
+			if(height > buildings[i]) {
+				buildings[i] = height;
+				buildingsEstimated[i] = height === BUILDING_DEFAULT_HEIGHT ? 1 : 0;
+			}
+		}
+	}
 	const endClutter = [CLUTTER_NONE, CLUTTER_NONE];
 	for(let i = 0; i <= steps; i++) {
 		const x = positions[i * 2], y = positions[i * 2 + 1];
@@ -724,6 +912,9 @@ export async function computeProfile({ a, b, settings, radio, rounding = 0 }) {
 		stepLength,
 		elevations,
 		trees,
+		buildings,
+		buildingsEstimated,
+		withBuildings,
 		wavelength,
 		refractionK: REFRACTION_K,
 		losses: { freeSpace: freeSpaceLoss, diffraction, clutterA: clutter[0], clutterB: clutter[1], total: pathLoss },
@@ -735,6 +926,8 @@ export async function computeProfile({ a, b, settings, radio, rounding = 0 }) {
 			metersPerSample: Math.round(stepLength),
 			terrainTiles: terrainTiles.size,
 			landCoverTiles: vectorTiles.size,
+			buildingTiles: buildingSpans.tiles,
+			buildingSpans: buildingSpans.spans.length,
 			loadMs: Math.round(loaded - started),
 			computeMs: Math.round(performance.now() - loaded),
 		},

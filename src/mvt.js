@@ -11,7 +11,7 @@ class Reader {
 		let result = 0, shift = 0, byte;
 		do {
 			byte = this.bytes[this.pos++];
-			// numbers above 2^31 only show up in fields we skip; keep the arithmetic safe anyway
+			// multiplication instead of bit shifts keeps numbers above 2^31 right
 			result += (byte & 0x7f) * 2 ** shift;
 			shift += 7;
 		} while(byte & 0x80);
@@ -49,22 +49,43 @@ class Reader {
 
 const textDecoder = new TextDecoder();
 
+// Value message: string (1), float (2), double (3), int64 (4), uint64 (5), sint64 (6), bool (7)
 function readValue(bytes) {
 	const reader = new Reader(bytes);
+	const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 	let value = null;
 	while(reader.pos < bytes.length) {
 		const [field, type] = reader.tag();
 		if(field === 1) value = textDecoder.decode(reader.bytesField());
-		// numbers and booleans aren't needed here
+		else if(field === 2 && type === 5) { value = view.getFloat32(reader.pos, true); reader.pos += 4; }
+		else if(field === 3 && type === 1) { value = view.getFloat64(reader.pos, true); reader.pos += 8; }
+		else if(field === 4 || field === 5) value = reader.varint();
+		else if(field === 6) { const n = reader.varint(); value = n % 2 ? -(n + 1) / 2 : n / 2; }
+		else if(field === 7) value = reader.varint() !== 0;
 		else reader.skip(type);
 	}
 	return value;
 }
 
-// Polygon rings of the features in `layerName` that pass `filter(properties)` (string properties only).
+// Polygon rings of the features in `layerName` that pass `filter(properties)`.
 // Returns { extent, rings: [[x0, y0, x1, y1, ...], ...] } in tile coordinates; holes wind the other
 // way, so filling with the nonzero rule leaves them out.
 export function readPolygons(buffer, layerName, filter) {
+	const rings = [];
+	const extent = readLayerOf(buffer, layerName, filter, (properties, featureRings) => rings.push(...featureRings));
+	return { extent, rings };
+}
+
+// Polygon features of `layerName` that pass `filter(properties)`, each with its own rings:
+// { extent, features: [{ properties, rings }, ...] }
+export function readPolygonFeatures(buffer, layerName, filter) {
+	const features = [];
+	const extent = readLayerOf(buffer, layerName, filter, (properties, rings) => features.push({ properties, rings }));
+	return { extent, features };
+}
+
+// Calls onFeature(properties, rings) for the layer's polygons; returns the layer's extent
+function readLayerOf(buffer, layerName, filter, onFeature) {
 	const tile = new Reader(new Uint8Array(buffer));
 	while(tile.pos < tile.bytes.length) {
 		const [field, type] = tile.tag();
@@ -72,13 +93,13 @@ export function readPolygons(buffer, layerName, filter) {
 			tile.skip(type);
 			continue;
 		}
-		const layer = readLayer(tile.bytesField(), layerName, filter);
-		if(layer) return layer;
+		const extent = readLayer(tile.bytesField(), layerName, filter, onFeature);
+		if(extent !== null) return extent;
 	}
-	return { extent: 4096, rings: [] };
+	return 4096;
 }
 
-function readLayer(bytes, layerName, filter) {
+function readLayer(bytes, layerName, filter, onFeature) {
 	const reader = new Reader(bytes);
 	let name = null, extent = 4096;
 	const keys = [], values = [], features = [];
@@ -97,7 +118,6 @@ function readLayer(bytes, layerName, filter) {
 	}
 	if(name !== layerName) return null;
 
-	const rings = [];
 	for(const featureBytes of features) {
 		const feature = new Reader(featureBytes);
 		let tags = [], geometryType = 0, geometry = null;
@@ -113,9 +133,11 @@ function readLayer(bytes, layerName, filter) {
 		const properties = {};
 		for(let i = 0; i + 1 < tags.length; i += 2) properties[keys[tags[i]]] = values[tags[i + 1]];
 		if(!filter(properties)) continue;
+		const rings = [];
 		decodeRings(geometry, rings);
+		onFeature(properties, rings);
 	}
-	return { extent, rings };
+	return extent;
 }
 
 // Geometry commands: MoveTo (1), LineTo (2), ClosePath (7); coordinates are zigzag deltas
