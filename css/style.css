@@ -891,6 +891,58 @@ body.dark .maplibregl-ctrl.map-button.active {
 	background: var(--primary);
 	color: var(--on-primary);
 }
+/* the first time the 3D view is on: how to turn and tilt it (map.js), a bubble next to its button */
+.view3d-hint {
+	position: fixed;
+	z-index: 1001;
+	inline-size: min(300px, calc(100vw - 90px));
+	padding: 12px 14px 10px;
+	border-radius: 10px;
+	background: var(--inverse-surface, #313033);
+	color: var(--inverse-on-surface, #f4eff4);
+	box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+	font-size: 0.85rem;
+	animation: view3d-hint-in 0.25s ease-out;
+}
+/* the arrow, pointing at the button */
+.view3d-hint::before {
+	content: '';
+	position: absolute;
+	left: -7px;
+	top: calc(var(--arrow-top, 50%) - 7px);
+	border-block: 7px solid transparent;
+	border-inline-end: 7px solid var(--inverse-surface, #313033);
+}
+.view3d-hint ul {
+	margin: 8px 0 10px;
+	padding: 0;
+	list-style: none;
+}
+.view3d-hint li {
+	display: flex;
+	gap: 8px;
+	align-items: flex-start;
+	margin-block: 6px;
+	line-height: 1.35;
+}
+.view3d-hint li i {
+	flex: none;
+	font-size: 18px;
+	opacity: 0.85;
+}
+.view3d-hint button.view3d-hint-close {
+	display: block;
+	margin: 0 0 0 auto;
+	block-size: 30px;
+	padding-inline: 14px;
+	background: var(--inverse-primary, #cfbcff);
+	color: var(--on-primary-container, #22005d);
+	font-size: 0.8rem;
+}
+@keyframes view3d-hint-in {
+	from { opacity: 0; transform: translateX(-6px); }
+}
+
 /* heading strip of the 3D view (map.js): at the top of the map, under the search box */
 .heading-strip {
 	position: absolute;

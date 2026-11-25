@@ -1129,6 +1129,61 @@ function addTurnAndTilt(map) {
 }
 
 // 3D view on / off
+// The first time the 3D view is switched on: a bubble next to its button on how to turn and tilt it
+// (mouse and keyboard, or touch). It goes with "Got it", once the view is turned or tilted, or with the
+// 3D view; it isn't shown again.
+const VIEW3D_HINT_KEY = 'view3dHintShown';
+
+function showView3dHint(map, anchor) {
+	try {
+		if(localStorage.getItem(VIEW3D_HINT_KEY)) return;
+		localStorage.setItem(VIEW3D_HINT_KEY, '1');
+	} catch { return; }
+	const touch = matchMedia('(pointer: coarse)').matches;
+	const hint = document.createElement('div');
+	hint.className = 'view3d-hint';
+	hint.setAttribute('role', 'dialog');
+	hint.setAttribute('aria-label', 'How to turn and tilt the 3D view');
+	hint.innerHTML = `
+		<b>Turn and tilt the 3D view</b>
+		<ul>${touch ? `
+			<li><i>rotate_right</i><span><b>Two fingers</b>: twist to turn</span></li>
+			<li><i>swipe_vertical</i><span><b>Two fingers</b>: drag up / down to tilt</span></li>` : `
+			<li><i>open_with</i><span><b>Shift + drag</b> (or the middle mouse button): left / right turns, up / down tilts</span></li>
+			<li><i>keyboard</i><span><b>Shift + arrow keys</b> work too</span></li>`}
+			<li><i>explore</i><span>The <b>compass</b> turns the map north up again</span></li>
+		</ul>
+		<button type="button" class="view3d-hint-close">Got it</button>`;
+	document.body.append(hint);
+
+	function place() {
+		const box = anchor.getBoundingClientRect();
+		hint.style.left = `${box.right + 12}px`;
+		hint.style.top = `${Math.max(8, Math.min(box.top + box.height / 2 - hint.offsetHeight / 2, innerHeight - hint.offsetHeight - 8))}px`;
+		hint.style.setProperty('--arrow-top', `${box.top + box.height / 2 - parseFloat(hint.style.top)}px`);
+	}
+	// once the 3D view's own tilt has eased in: the user turning or tilting it
+	let watching = false;
+	const startWatching = () => { if(map.getPitch() >= PITCH_3D - 1) watching = true; };
+	const onTurn = () => { if(watching) close(); };
+	function close() {
+		hint.remove();
+		removeEventListener('resize', place);
+		map.off('resize', place);
+		map.off('moveend', startWatching);
+		map.off('rotate', onTurn);
+		map.off('pitch', onTurn);
+	}
+	hint.querySelector('.view3d-hint-close').addEventListener('click', close);
+	addEventListener('resize', place);
+	map.on('resize', place);
+	map.on('moveend', startWatching);
+	map.on('rotate', onTurn);
+	map.on('pitch', onTurn);
+	place();
+	return close;
+}
+
 class View3dControl {
 	constructor(on, onChange) {
 		this.on = on;
@@ -1347,14 +1402,18 @@ export function createMap(elementId, { lat, lon, zoom }) {
 	});
 	// bottom corners stack upwards, so this one ends up above the base map switcher
 	map.addControl(new ThemeControl(), 'bottom-left');
-	map.addControl(new View3dControl(map.view3d, on => {
+	let closeView3dHint = null;
+	const view3dControl = new View3dControl(map.view3d, on => {
+		closeView3dHint?.();
+		closeView3dHint = on ? showView3dHint(map, view3dControl.button) : null;
 		map.view3d = on;
 		try { localStorage.setItem('view3d', on ? '1' : '0'); } catch {}
 		compass.setVisible(on);
 		// the style again, with / without the terrain; then the tilt (a new style stops camera animations)
 		loadBaseMap();
 		map.once('style.load', () => { if(map.view3d === on) apply3dView(map, on); });
-	}), 'bottom-left');
+	});
+	map.addControl(view3dControl, 'bottom-left');
 	const compass = new CompassControl();
 	map.addControl(compass, 'bottom-left');
 	compass.setVisible(map.view3d);
