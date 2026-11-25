@@ -9,9 +9,13 @@ export function writeUrlParams(params) {
 	history.replaceState({}, '', `/?${new URLSearchParams(params)}`);
 }
 
+// The map's centre and zoom, and the 3D view's camera (tilt, heading in degrees) when the link has one
 export function getInitialView(params) {
 	const lat = Number(params.lat), lon = Number(params.lon), zoom = Number(params.zoom);
-	return lat && lon && zoom ? { lat, lon, zoom } : DEFAULT_VIEW;
+	if(!(lat && lon && zoom)) return DEFAULT_VIEW;
+	const tilt = Number(params.tilt), heading = Number(params.heading || 0);
+	const camera3d = params.tilt && Number.isFinite(tilt) && Number.isFinite(heading) ? { tilt, heading } : null;
+	return { lat, lon, zoom, camera3d };
 }
 
 export function isDeletionRequest(params) {
@@ -24,7 +28,7 @@ export function isDeletionRequest(params) {
 export function getFiltersFromUrl(params) {
 	const filters = {};
 	if(params.nodes) filters.nodeFilter = params.nodes.split(',').map(Number);
-	if(params.freq) filters.freqFilter = params.freq.split(',').map(Number);
+	if(params.radio) filters.presetFilter = String(params.radio);
 	if(params.date) filters.fromDate = params.date;
 	if(params.dateInsert) filters.fromInsertDate = params.dateInsert;
 	if(params.dupes === '1') filters.onlyDuplicates = true;
@@ -38,12 +42,23 @@ export function setMapPosition(params, map) {
 	params.lat = pos.lat.toFixed(4);
 	params.lon = pos.lng.toFixed(4);
 	params.zoom = Math.round(fromMapZoom(map.getZoom()) * 100) / 100;
+	// the 3D view's camera
+	if(map.view3d) {
+		params.tilt = Math.round(map.getPitch());
+		params.heading = Math.round((map.getBearing() % 360 + 360) % 360);
+	}
+	else {
+		delete params.tilt;
+		delete params.heading;
+	}
 }
 
 export function clearMapPosition(params) {
 	delete params.lat;
 	delete params.lon;
 	delete params.zoom;
+	delete params.tilt;
+	delete params.heading;
 }
 
 // Planning sites in the URL: a node's public key, or "lat,lon" of a picked point

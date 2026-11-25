@@ -1080,7 +1080,7 @@ function with3dView(style) {
 }
 
 // The 3D view's camera and controls on / off (the terrain comes with the style: with3dView)
-function apply3dView(map, on, { animate = true } = {}) {
+function apply3dView(map, on, { animate = true, camera = null } = {}) {
 	const duration = animate ? 1000 : 0;
 	if(on) {
 		map.setMaxPitch(MAX_PITCH_3D);
@@ -1089,7 +1089,7 @@ function apply3dView(map, on, { animate = true } = {}) {
 		map.keyboard.enableRotation();
 		// Shift + drag turns the map here, not a zoom box
 		map.boxZoom.disable();
-		map.easeTo({ pitch: PITCH_3D, duration });
+		map.easeTo(camera ? { pitch: camera.tilt, bearing: camera.heading, duration } : { pitch: PITCH_3D, duration });
 	} else {
 		map.touchPitch.disable();
 		map.touchZoomRotate.disableRotation();
@@ -1308,8 +1308,13 @@ class CompassControl {
 	}
 }
 
-export function createMap(elementId, { lat, lon, zoom }) {
+// camera3d: the 3D view's { tilt, heading } from a link (opens the 3D view) or null
+export function createMap(elementId, { lat, lon, zoom, camera3d = null }) {
 	let baseMap = readBaseMapSelection();
+	if(camera3d) {
+		try { localStorage.setItem('view3d', '1'); } catch {}
+	}
+	const view3d = !!camera3d || read3dView();
 
 	const map = new MapLibreMap({
 		container: elementId,
@@ -1323,9 +1328,9 @@ export function createMap(elementId, { lat, lon, zoom }) {
 		touchPitch: false,
 		rollEnabled: false,
 		attributionControl: { customAttribution: APP_ATTRIBUTION },
-		maxPitch: read3dView() ? MAX_PITCH_3D : 60,
+		maxPitch: view3d ? MAX_PITCH_3D : 60,
 	});
-	map.view3d = read3dView();
+	map.view3d = view3d;
 	addTurnAndTilt(map);
 	// parts of the map shown / hidden (MAP_LAYER_GROUPS), and the layers the base map itself hides
 	const shownMapLayers = readShownMapLayers();
@@ -1422,7 +1427,7 @@ export function createMap(elementId, { lat, lon, zoom }) {
 	// the heading when the map is tilted too much to read the compass
 	addHeadingStrip(map);
 	// a 3D view from last time (the terrain comes with the style)
-	if(map.view3d) apply3dView(map, true, { animate: false });
+	if(map.view3d) apply3dView(map, true, { animate: false, camera: camera3d && { tilt: Math.max(0, Math.min(MAX_PITCH_3D, camera3d.tilt)), heading: camera3d.heading } });
 
 	// on narrow screens MapLibre shows the compact attribution expanded until the first drag,
 	// covering the map buttons - start collapsed (the ⓘ button still expands it)

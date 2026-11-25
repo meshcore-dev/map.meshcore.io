@@ -29,7 +29,7 @@ All code is native ES modules in `src/`, loaded directly by the browser:
 ## Libraries used
 * [Vue3](https://github.com/vuejs/core)
 * [Beer.css](https://github.com/beercss/beercss)
-* [MapLibre GL JS](https://github.com/maplibre/maplibre-gl-js)
+* [MapLibre GL JS](https://github.com/maplibre/maplibre-gl-js) 6.16.0, patched: in `lib/maplibre-gl.mjs`, `calculate_visibility` (symbol shaders) returns 1.0 with 3D terrain, so labels and markers behind hills aren't faded, and the terrain's fog is drawn only in the first terrain pass (`KN`/`hj`: the later passes, for lines and circles above the labels, painted it over them) (re-apply when upgrading)
 * [msgpackr](https://github.com/kriszyp/msgpackr)
 * qr.js (ESM version by Horacio Gonzalez)
 * [Material icons](https://fonts.google.com/icons)

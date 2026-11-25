@@ -24,7 +24,7 @@ import { useDock } from './dock.js';
 import { createProfile3d } from './profile-3d.js';
 import { createCoverage3d } from './coverage-3d.js';
 import {
-	collectFrequencies, computeStats, fetchNodes, filterNodes, groupByType, prepareNode, searchNodes,
+	computeStats, countRadioKeys, radioKey, fetchNodes, filterNodes, groupByType, prepareNode, searchNodes,
 } from './nodes.js';
 import { PLACE_SEARCH_DELAY_MS, PLACE_SEARCH_MIN_LENGTH, formatCoordinates, parseCoordinates, searchPlaces } from './places.js';
 import { findPresets, getRadioPresets, loadPresets, presetsLoaded } from './presets.js';
@@ -51,7 +51,7 @@ function sameMembers(a, b) {
 
 function isDefaultFilter(state) {
 	return sameMembers(state.nodeFilter, DEFAULT_FILTERS.nodeFilter) &&
-		sameMembers(state.freqFilter, DEFAULT_FILTERS.freqFilter) &&
+		state.presetFilter === DEFAULT_FILTERS.presetFilter &&
 		state.fromDate === DEFAULT_FILTERS.fromDate &&
 		state.fromInsertDate === DEFAULT_FILTERS.fromInsertDate &&
 		state.onlyDuplicates === DEFAULT_FILTERS.onlyDuplicates;
@@ -64,7 +64,6 @@ export function mountApp(selector, { map, urlParams }) {
 			const app = reactive({
 				...cloneDefaultFilters(),
 				search: '',
-				availableFreqs: [],
 				urlParams,
 				loading: false,
 				searchInViewport: false,
@@ -78,9 +77,35 @@ export function mountApp(selector, { map, urlParams }) {
 			const nodes = shallowRef([]);
 			const nodesByType = shallowRef({});
 
+			// the community radio presets (loaded once): the node filter, picked points' radio settings
+			const radioPresets = shallowRef([]);
+			loadPresets().then(() => { radioPresets.value = getRadioPresets(); }, console.error);
+			// the preset filter's choices: presets with the same radio settings as one (named after the first,
+			// labelled with all their names, comma separated like in the node popup), with how many nodes use them
+			const presetFilterOptions = computed(() => {
+				const counts = countRadioKeys(nodes.value);
+				const groups = new Map();
+				for(const { name, params } of radioPresets.value) {
+					const key = radioKey(params);
+					if(groups.has(key)) groups.get(key).names.push(name);
+					else groups.set(key, { name, names: [name], count: counts.get(key) ?? 0 });
+				}
+				return [...groups.values()].map(group => ({ ...group, label: group.names.join(', ') }));
+			});
+			// the dropdown's value: the group of the chosen preset (a link may name any preset of a group)
+			const presetFilterChoice = computed({
+				get: () => presetFilterOptions.value.find(group => group.names.includes(app.presetFilter))?.name ?? app.presetFilter,
+				set: name => { app.presetFilter = name; },
+			});
+			// (until the presets are loaded, a preset from the URL doesn't filter yet)
+			const presetFilterKey = computed(() => {
+				const preset = app.presetFilter && radioPresets.value.find(p => p.name === app.presetFilter);
+				return preset ? radioKey(preset.params) : null;
+			});
+
 			// With default filters every node is shown (including ones older than the default dates)
 			const filteredNodes = computed(() =>
-				isDefaultFilter(app) ? nodes.value : filterNodes(nodesByType.value, app)
+				isDefaultFilter(app) ? nodes.value : filterNodes(nodesByType.value, app, presetFilterKey.value)
 			);
 			const filtersActive = computed(() => filteredNodes.value.length !== nodes.value.length);
 
@@ -199,10 +224,16 @@ export function mountApp(selector, { map, urlParams }) {
 
 
 			watch(
-				[() => app.nodeFilter, () => app.freqFilter, () => app.fromDate, () => app.fromInsertDate, () => app.onlyDuplicates],
+				[() => app.nodeFilter, () => app.presetFilter, () => app.fromDate, () => app.fromInsertDate, () => app.onlyDuplicates],
 				() => {
 					app.urlParams.nodes = app.nodeFilter.join(',');
-					app.urlParams.freq = app.freqFilter.join(',');
+					// (the frequency filter it replaced)
+					delete app.urlParams.freq;
+					if(app.presetFilter) {
+						app.urlParams.radio = app.presetFilter;
+					} else {
+						delete app.urlParams.radio;
+					}
 					app.urlParams.date = app.fromDate;
 					app.urlParams.dateInsert = app.fromInsertDate;
 					if(app.onlyDuplicates) {
@@ -372,9 +403,6 @@ export function mountApp(selector, { map, urlParams }) {
 				Object.assign(app, cloneDefaultFilters());
 			}
 
-			// radio presets for picked points (the community presets, loaded once)
-			const radioPresets = shallowRef([]);
-			loadPresets().then(() => { radioPresets.value = getRadioPresets(); }, console.error);
 			const selectedRadioPreset = computed(() => radioPresets.value.find(p => p.name === coverage.radioPreset) ?? null);
 
 			// Presets to offer for picked points: the ones used by nodes within PRESET_RADIUS_KM of
@@ -994,7 +1022,6 @@ export function mountApp(selector, { map, urlParams }) {
 
 					nodesByType.value = groupByType(list);
 					nodes.value = list;
-					app.availableFreqs = collectFrequencies(list);
 				}
 				catch(e) {
 					console.error(e);
@@ -1039,7 +1066,7 @@ export function mountApp(selector, { map, urlParams }) {
 			});
 
 			return {
-				app, stats, searchResults, filtersActive,
+				app, stats, searchResults, filtersActive, presetFilterOptions, presetFilterChoice,
 				onSearchSelect, clearFilters, closeAllCoverage, selectCoverageSite, searchPoint, searchPlaceResults, showSearchResults, onSearchPoint, onSearchPlace, onSearchEnter,
 				coverage, closeCoverage, compassPoint, coverageOptions: COVERAGE_OPTIONS, coverageSliders: COVERAGE_SLIDERS, coverageAntennaTypes: ANTENNA_TYPES, coverageReceiver: COVERAGE_RECEIVER, coverageFadeMargin: COVERAGE_FADE_MARGIN, buildingsMaxKm: BUILDINGS_MAX_DISTANCE / 1000,
 				coverageSensitivity, coverageInfoOpen, coverageShadow3d,

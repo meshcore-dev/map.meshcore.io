@@ -47,7 +47,7 @@ export function prepareNode(node) {
 	node.coords = `${node.lat.toFixed(4)}, ${node.lon.toFixed(4)}`;
 	node.insertDate = new Date(node.inserted_date);
 	node.updatedDate = node.updated_date ? new Date(node.updated_date) : null;
-	node.freqMhz = node.params?.freq ? Math.floor(node.params.freq) : null;
+	node.radioKey = radioKey(node.params);
 	return node;
 }
 
@@ -59,25 +59,33 @@ export function groupByType(nodes) {
 	return byType;
 }
 
-export function collectFrequencies(nodes) {
-	const freqs = new Set();
-	for(const node of nodes) {
-		if(node.freqMhz) freqs.add(node.freqMhz);
-	}
-	return [...freqs].sort((a, b) => a - b);
+// Radio settings as one value (frequency, bandwidth, spreading factor, coding rate), to compare nodes
+// with presets; null without them
+export function radioKey(params) {
+	if(!params?.freq) return null;
+	return [params.freq, params.bw, params.sf, params.cr].map(Number).join('|');
 }
 
-export function filterNodes(nodesByType, { nodeFilter, freqFilter, fromDate, fromInsertDate, onlyDuplicates }) {
+// How many nodes use each radio setting: radio key -> count
+export function countRadioKeys(nodes) {
+	const counts = new Map();
+	for(const node of nodes) {
+		if(node.radioKey) counts.set(node.radioKey, (counts.get(node.radioKey) ?? 0) + 1);
+	}
+	return counts;
+}
+
+// presetKey: the radio key of the preset nodes must use, null for any
+export function filterNodes(nodesByType, { nodeFilter, fromDate, fromInsertDate, onlyDuplicates }, presetKey = null) {
 	const from = new Date(fromDate);
 	const fromInsert = new Date(fromInsertDate);
-	const freqs = freqFilter.length > 0 ? new Set(freqFilter.map(Number)) : null;
 
 	const result = [];
 	for(const type of nodeFilter) {
 		for(const node of nodesByType[type] ?? []) {
 			if((node.updatedDate ?? node.insertDate) <= from) continue;
 			if(node.insertDate <= fromInsert) continue;
-			if(freqs && !freqs.has(node.freqMhz)) continue;
+			if(presetKey && node.radioKey !== presetKey) continue;
 			result.push(node);
 		}
 	}

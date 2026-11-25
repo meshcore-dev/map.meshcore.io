@@ -1280,6 +1280,11 @@ time {
 	gap:0;
 	align-items:start;
 }
+#node-filter select.preset-filter {
+	inline-size: 100%;
+	margin-left: 15px;
+	max-inline-size: calc(100% - 15px);
+}
 #node-filter li.columns label {
 	margin-left: 15px !important;
 }

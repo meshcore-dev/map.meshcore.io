@@ -14,11 +14,11 @@ export const DEFAULT_VIEW = { lat: 7, lon: 25, zoom: 3 };
 
 export const DEFAULT_FILTERS = {
 	nodeFilter: [1, 2, 3, 4],
-	freqFilter: [],
+	// radio preset name ('' for all)
+	presetFilter: '',
 	fromDate: '2025-03-01',
 	fromInsertDate: '2025-03-01',
 	clusteringZoom: 12,
-	presetIndex: 0,
 	onlyDuplicates: false,
 };
 

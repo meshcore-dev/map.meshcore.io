@@ -69,13 +69,6 @@
 								<input type="checkbox" value="4" v-model="app.nodeFilter"><span>Sensors</span>
 							</label>
 						</li>
-						<!--li v-if="app.presets.length > 0">
-							<label class="select">
-								<select v-model="app.presetIndex">
-									<option v-for="(preset, i) of app.presets" :value="i">{{ preset.name }}</option>
-								</select>
-							</label>
-						</li-->
 						<li>
 							<div class="field label prefix fill small">
 								<i>today</i>
@@ -98,12 +91,12 @@
 							</label>
 						</li>
 						<li class="divider"></li>
-						<li class="columns" v-if="app.availableFreqs.length > 0">
-							<span>Frequency</span>
-							<label class="checkbox" v-for="freq in app.availableFreqs" :key="freq">
-								<input type="checkbox" :value="freq" v-model="app.freqFilter">
-								<span>{{ freq }} MHz</span>
-							</label>
+						<li class="columns" v-if="presetFilterOptions.length > 0">
+							<span>Radio preset</span>
+							<select class="preset-select preset-filter" v-model="presetFilterChoice">
+								<option value="">All presets</option>
+								<option v-for="preset in presetFilterOptions" :key="preset.name" :value="preset.name">{{ preset.label }} ({{ preset.count }})</option>
+							</select>
 						</li>
 						<li class="divider"></li>
 						<li>
